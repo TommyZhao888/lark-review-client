@@ -1,0 +1,9 @@
+# 依赖(用 npm install 重生)
+node_modules/
+
+# 本地配置 / 运行时(含 token, 切勿入库)
+config.json
+.lark-review-client.json
+*.log
+*.pid
+.DS_Store

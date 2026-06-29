@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Review Client 配置</title>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e6e9ef; --mut:#8b93a3; --acc:#4f8cff; --ok:#3ecf8e; --err:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  main { padding:24px; max-width:760px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; margin-bottom:18px; }
+  .card h2 { font-size:13px; margin:0 0 14px; color:var(--mut); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  label { display:block; font-size:12px; color:var(--mut); margin:12px 0 4px; }
+  input { font:inherit; background:#0f1115; border:1px solid var(--line); color:var(--fg); padding:9px 11px; border-radius:7px; width:100%; }
+  textarea { font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:#0f1115; border:1px solid var(--line); color:var(--fg); padding:10px 12px; border-radius:7px; width:100%; resize:vertical; }
+  code { background:#22262f; padding:1px 5px; border-radius:4px; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  button { font:inherit; cursor:pointer; border:1px solid var(--line); background:#222632; color:var(--fg); padding:9px 14px; border-radius:7px; }
+  button.acc { background:var(--acc); border-color:var(--acc); color:#fff; }
+  button.sm { padding:4px 10px; font-size:12px; }
+  .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; }
+  .dot.on { background:var(--ok); } .dot.off { background:#666; }
+  .idrow { display:flex; gap:24px; flex-wrap:wrap; }
+  .idrow div span { color:var(--mut); font-size:12px; display:block; }
+  .repo { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:10px; position:relative; }
+  .repo .rm { position:absolute; top:8px; right:8px; }
+  .two { display:flex; gap:12px; } .two>div { flex:1; }
+  .err { color:var(--err); } .ok { color:var(--ok); } .muted{ color:var(--mut); }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#222632; border:1px solid var(--line); padding:10px 16px; border-radius:8px; opacity:0; transition:opacity .2s; }
+  .toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header><h1>🧑‍💻 Review Client 配置</h1><span class="muted" id="ver"></span></header>
+<main>
+  <div class="card">
+    <h2>身份(由服务端分配,不可改)</h2>
+    <div class="idrow">
+      <div><span>状态</span><b id="conn"><span class="dot off"></span>未连接</b></div>
+      <div><span>姓名</span><b id="iName">—</b></div>
+      <div><span>open_id</span><b class="mono" id="iOid">—</b></div>
+    </div>
+    <div class="muted" id="connHint" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>连接</h2>
+    <label>服务端地址 serverUrl</label>
+    <input id="serverUrl" class="mono" placeholder="ws://hub-host:8788 (向管理员索取)">
+    <label>token(向管理员索取)</label>
+    <input id="token" class="mono" type="password" placeholder="粘贴管理员给你的 token">
+  </div>
+
+  <div class="card">
+    <h2>本机环境</h2>
+    <div class="two">
+      <div><label>claude 路径</label><input id="claudePath" class="mono" placeholder="claude 或绝对路径"></div>
+      <div><label>review 模型</label><input id="reviewModel" class="mono" placeholder="claude-opus-4-8"></div>
+    </div>
+    <div class="two">
+      <div><label>worktree 最长保留天数</label><input id="worktreeMaxAgeDays" type="number" placeholder="14"></div>
+      <div><label>心跳间隔(ms)</label><input id="heartbeatMs" type="number" placeholder="15000"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>项目(repos)</h2>
+    <div id="repos"></div>
+    <button class="sm" onclick="addRepo()">+ 添加项目</button>
+    <div class="muted" style="margin-top:8px">只有你配了的 repo,服务端才会把对应 PR 派给你。</div>
+  </div>
+
+  <div class="card">
+    <h2>Review 提示词(可选)</h2>
+    <div class="muted" style="margin-bottom:8px">留空 = 用内置默认模板。支持占位符 <code>{{PR_NUM}}</code> <code>{{WORKTREE_PATH}}</code> <code>{{CI_STATUS}}</code>(运行时自动替换)。</div>
+    <textarea id="promptOverride" rows="12" placeholder="(留空 = 使用默认模板)"></textarea>
+    <div style="margin-top:8px; display:flex; gap:8px">
+      <button class="sm" type="button" onclick="loadDefaultPrompt()">填入默认模板以编辑</button>
+      <button class="sm" type="button" onclick="document.getElementById('promptOverride').value=''">清空(改回默认)</button>
+    </div>
+  </div>
+
+  <div style="display:flex; gap:12px; align-items:center">
+    <button class="acc" onclick="save()">保存并应用(热重载)</button>
+    <span id="msg"></span>
+  </div>
+</main>
+<div id="toast" class="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
+function esc(s){ return String(s==null?'':s); }
+
+function repoRow(name='', mainRepo='', worktreeBase=''){
+  const d = document.createElement('div'); d.className='repo';
+  d.innerHTML = `<button class="sm rm" onclick="this.parentNode.remove()">删除</button>
+    <label>owner/repo</label><input class="mono r-name" value="${esc(name)}" placeholder="Liontech-tw/lion-trip-app-global">
+    <div class="two">
+      <div><label>本机 clone 路径 mainRepo</label><input class="mono r-main" value="${esc(mainRepo)}" placeholder="/Users/you/Source/xxx"></div>
+      <div><label>worktree 目录 worktreeBase</label><input class="mono r-wt" value="${esc(worktreeBase)}" placeholder="/Users/you/Source/xxx-worktrees"></div>
+    </div>`;
+  $('repos').appendChild(d);
+}
+function addRepo(){ repoRow(); }
+
+async function load(){
+  const c = await fetch('/config').then(r=>r.json());
+  $('serverUrl').value=c.serverUrl||''; $('token').value=c.token||'';
+  $('claudePath').value=c.claudePath||''; $('reviewModel').value=c.reviewModel||'';
+  $('worktreeMaxAgeDays').value=c.worktreeMaxAgeDays||''; $('heartbeatMs').value=c.heartbeatMs||'';
+  $('promptOverride').value=c.promptOverride||''; window.__defaultPrompt=c.defaultPrompt||'';
+  $('repos').innerHTML='';
+  const repos=c.repos||{}; const ks=Object.keys(repos);
+  if(!ks.length) repoRow(); else ks.forEach(k=>repoRow(k, repos[k].mainRepo, repos[k].worktreeBase));
+  refreshStatus();
+}
+function loadDefaultPrompt(){ $('promptOverride').value = window.__defaultPrompt || ''; }
+async function refreshStatus(){
+  try { const s = await fetch('/status').then(r=>r.json());
+    $('ver').textContent = 'client v'+(s.client_version||'?');
+    $('conn').innerHTML = (s.connected?'<span class="dot on"></span>已连接':'<span class="dot off"></span>未连接')
+      + (s.registered?' · 已注册':'');
+    $('iName').textContent = s.name||'—'; $('iOid').textContent = s.open_id||'—';
+    $('connHint').textContent = s.connected ? (s.recommended_version?('服务端推荐客户端 v'+s.recommended_version):'') : '连上服务端后会自动显示你的姓名/open_id。检查 serverUrl 与 token。';
+  } catch(e){}
+}
+function collect(){
+  const repos={};
+  document.querySelectorAll('#repos .repo').forEach(d=>{
+    const n=d.querySelector('.r-name').value.trim();
+    if(!n) return;
+    repos[n]={ mainRepo:d.querySelector('.r-main').value.trim(), worktreeBase:d.querySelector('.r-wt').value.trim() };
+  });
+  return {
+    serverUrl:$('serverUrl').value.trim(), token:$('token').value.trim(),
+    claudePath:$('claudePath').value.trim()||'claude', reviewModel:$('reviewModel').value.trim()||'claude-opus-4-8',
+    worktreeMaxAgeDays:Number($('worktreeMaxAgeDays').value)||14, heartbeatMs:Number($('heartbeatMs').value)||15000,
+    promptOverride:$('promptOverride').value,
+    repos
+  };
+}
+async function save(){
+  $('msg').textContent='';
+  const cfg=collect();
+  if(!cfg.serverUrl||!cfg.token){ $('msg').innerHTML='<span class="err">serverUrl 和 token 必填</span>'; return; }
+  if(!Object.keys(cfg.repos).length){ $('msg').innerHTML='<span class="err">至少配一个项目</span>'; return; }
+  try {
+    const r = await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());
+    if(r.ok){ toast('已保存,正在按新配置重连…'); $('msg').innerHTML='<span class="ok">已保存并热重载</span>'; setTimeout(refreshStatus,1500); }
+    else $('msg').innerHTML='<span class="err">'+esc(r.error||'保存失败')+'</span>';
+  } catch(e){ $('msg').innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
+}
+load();
+setInterval(refreshStatus, 4000);
+</script>
+</body>
+</html>

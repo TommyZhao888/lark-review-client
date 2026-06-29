@@ -1,0 +1,21 @@
+{
+  "serverUrl": "ws://hub-host:8788  (向管理员索取; 本机自测可用 ws://127.0.0.1:8788)",
+  "token": "向管理员索取, 与你绑定的长随机串",
+
+  "reviewModel": "claude-opus-4-8",
+  "claudePath": "claude",
+  "heartbeatMs": 15000,
+  "worktreeMaxAgeDays": 14,
+  "configPort": 8790,
+
+  "repos": {
+    "Liontech-tw/lion-trip-app-global": {
+      "mainRepo": "/Users/you/Source/lion-trip-app-global",
+      "worktreeBase": "/Users/you/Source/lion-trip-app-global-worktrees"
+    }
+  },
+
+  "promptOverride": null,
+
+  "_note": "无需填 name / openId —— 连上服务端后由服务端按 token 自动下发。也可不手写本文件, 直接开 http://127.0.0.1:8790 用网页配置。"
+}

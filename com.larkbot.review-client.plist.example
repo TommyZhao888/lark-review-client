@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- lark-review-client 开机自启模板(macOS launchd)。让你的 client 登录即起 + 崩溃自动重启。
+     安装(把下面 3 处 /ABSOLUTE/... 和 YOU 改成你本机的真实值):
+       1. cp client/com.larkbot.review-client.plist.example ~/Library/LaunchAgents/com.larkbot.review-client.plist
+       2. 编辑该 plist 里的路径(run-client.sh 全路径 + 你的用户名)
+       3. launchctl load ~/Library/LaunchAgents/com.larkbot.review-client.plist
+     查看: launchctl list | grep review-client
+     停掉: launchctl unload ~/Library/LaunchAgents/com.larkbot.review-client.plist
+     不想用 launchd 的话, 直接 ./run-client.sh start 也行(只是重启后不自启)。 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.larkbot.review-client</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/ABSOLUTE/PATH/TO/client/run-client.sh</string>
+    <string>fg</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/.lark-review-client.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/.lark-review-client.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/YOU</string>
+    <key>LARK_REVIEW_CLIENT_CONFIG</key>
+    <string>/Users/YOU/.lark-review-client.json</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/YOU/.local/bin</string>
+  </dict>
+</dict>
+</plist>
