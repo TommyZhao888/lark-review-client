@@ -63,6 +63,36 @@ function fail(msg)    { console.error('[client] FATAL:', msg); process.exit(1); 
 let cfg = loadConfig();
 log(`config ${CONFIG_PATH} loaded, repos: ${Object.keys(cfg.repos || {}).join(', ') || '(无)'} (身份由服务端按 token 下发)`);
 
+// ---------- 每次 review 的完整 claude 输出, 存到本机 ----------
+const REVIEW_LOG_DIR = process.env.LARK_REVIEW_CLIENT_REVIEW_LOG_DIR || path.join(os.homedir(), '.lark-review-client-logs');
+try { fs.mkdirSync(REVIEW_LOG_DIR, { recursive: true }); } catch { /* ignore */ }
+
+// 把一次 review 的完整输出(claude stdout+stderr)写入本机日志文件, 返回路径。
+function writeReviewLog(job, code, parsed, logText) {
+  try {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = path.join(REVIEW_LOG_DIR, `pr-${job.pr_num}-${ts}.log`);
+    const header =
+      `# PR #${job.pr_num}  repo=${job.repo}  branch=${job.branch}\n` +
+      `# job=${job.job_id}  model=${job.review_model || cfg.reviewModel}  time=${new Date().toISOString()}\n` +
+      `# exit=${code}  verdict=${parsed.verdict || '-'}  inline=${parsed.inline_count}  general_comment=${parsed.general_comment_url || '-'}\n` +
+      `${'#'.repeat(64)}\n\n`;
+    fs.writeFileSync(file, header + (logText || ''));
+    return file;
+  } catch (e) { logErr('writeReviewLog:', e.message); return null; }
+}
+
+// 清理超过 worktreeMaxAgeDays 天的 review 日志, 避免无限增长。
+function pruneReviewLogs() {
+  const cutoff = Date.now() - (cfg.worktreeMaxAgeDays || 14) * 86400_000;
+  let ents; try { ents = fs.readdirSync(REVIEW_LOG_DIR); } catch { return; }
+  for (const n of ents) {
+    if (!/^pr-.*\.log$/.test(n)) continue;
+    const p = path.join(REVIEW_LOG_DIR, n);
+    try { if (fs.statSync(p).mtimeMs < cutoff) fs.unlinkSync(p); } catch { /* ignore */ }
+  }
+}
+
 // ---------- 默认 review prompt 模板（与服务端原 worker.sh 一致）----------
 // 可在配置里用 promptOverride 覆盖；支持占位符 {{PR_NUM}} {{WORKTREE_PATH}} {{CI_STATUS}}。
 const DEFAULT_PROMPT_TEMPLATE = `Run /pr-review {{PR_NUM}} fully autonomously and submit the result yourself.
@@ -187,6 +217,8 @@ async function runReviewJob(job) {
   const logText = (r.stdout || '') + (r.stderr || '');
   const parsed = parseResult(logText);
   log(`claude exited=${r.code} verdict=${parsed.verdict || '-'} inline=${parsed.inline_count}`);
+  const savedLog = writeReviewLog(job, r.code, parsed, logText);
+  if (savedLog) log(`review 完整日志已存: ${savedLog}`);
   return {
     exit_code: r.code,
     log_tail: logText.slice(-8000),
@@ -392,6 +424,22 @@ function startConfigServer() {
     if (req.method === 'GET' && u === '/logs') {
       return json(200, { path: LOG_PATH, log: tailLog() });
     }
+    if (req.method === 'GET' && u === '/review-logs') {
+      let logs = [];
+      try {
+        logs = fs.readdirSync(REVIEW_LOG_DIR)
+          .filter((n) => /^pr-.*\.log$/.test(n))
+          .map((n) => ({ file: n, mtime: fs.statSync(path.join(REVIEW_LOG_DIR, n)).mtimeMs }))
+          .sort((a, b) => b.mtime - a.mtime).slice(0, 50);
+      } catch { /* dir 可能还不存在 */ }
+      return json(200, { dir: REVIEW_LOG_DIR, logs });
+    }
+    if (req.method === 'GET' && u === '/review-log') {
+      const f = (new URL(req.url, 'http://x').searchParams.get('file')) || '';
+      if (!/^pr-[^/]+\.log$/.test(f)) return json(400, { error: 'bad file' });
+      try { return json(200, { file: f, log: fs.readFileSync(path.join(REVIEW_LOG_DIR, f), 'utf8').slice(-200000) }); }
+      catch (e) { return json(200, { file: f, log: '读取失败: ' + e.message }); }
+    }
     if (req.method === 'POST' && u === '/restart') {
       json(200, { ok: true });
       doRestart();
@@ -414,8 +462,9 @@ if (configReady(cfg)) {
 } else {
   log(`尚未配置(缺 serverUrl/token/repos)。已仅启动配置页: http://127.0.0.1:${cfg.configPort} —— 填好保存即自动连接`);
 }
-setInterval(() => pruneStaleWorktrees().catch((e) => logErr('prune:', e.message)), 6 * 3600_000).unref();
+setInterval(() => { pruneStaleWorktrees().catch((e) => logErr('prune:', e.message)); pruneReviewLogs(); }, 6 * 3600_000).unref();
 pruneStaleWorktrees().catch(() => {});
+pruneReviewLogs();
 
 process.on('SIGINT', () => { log('bye'); process.exit(0); });
 process.on('SIGTERM', () => { log('bye'); process.exit(0); });

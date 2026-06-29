@@ -23,8 +23,12 @@
   button.sm { padding:4px 10px; font-size:12px; }
   .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; }
   .dot.on { background:var(--ok); } .dot.off { background:#666; }
-  .idrow { display:flex; gap:24px; flex-wrap:wrap; }
+  .idrow { display:flex; gap:10px 28px; flex-wrap:wrap; align-items:flex-start; }
   .idrow div span { color:var(--mut); font-size:12px; display:block; }
+  #conn { display:inline-flex; align-items:center; white-space:nowrap; }
+  #iName { white-space:nowrap; }
+  #iOid { word-break:break-all; }
+  select { font:inherit; background:#0f1115; border:1px solid var(--line); color:var(--fg); padding:6px 9px; border-radius:7px; }
   .repo { border:1px solid var(--line); border-radius:8px; padding:12px; margin-bottom:10px; position:relative; }
   .repo .rm { position:absolute; top:8px; right:8px; }
   .two { display:flex; gap:12px; } .two>div { flex:1; }
@@ -106,12 +110,13 @@
 
  <div id="tab-logs" class="hide">
   <div class="card">
-    <h2>客户端日志 <span class="muted" id="logpath"></span></h2>
-    <div style="display:flex; gap:10px; margin-bottom:10px; align-items:center">
+    <h2>日志 <span class="muted" id="logpath"></span></h2>
+    <div style="display:flex; gap:10px; margin-bottom:10px; align-items:center; flex-wrap:wrap">
+      <select id="logsel" onchange="onLogSel()"><option value="">客户端运行日志</option></select>
       <button class="sm" onclick="loadLogs()">刷新</button>
       <label class="muted" style="margin:0; display:flex; align-items:center; gap:5px"><input type="checkbox" id="logauto" checked onchange="startLogAuto()" style="width:auto"> 自动刷新(3s)</label>
-      <span class="muted">显示最近日志(含派单 / claude 退出码 / 连接事件)</span>
     </div>
+    <div class="muted" style="margin-bottom:8px">运行日志=派单/claude 退出码/连接事件; 选某次 review 可看该次 claude 的完整输出(存于本机 ~/.lark-review-client-logs)。</div>
     <pre id="logbox" class="logbox">加载中…</pre>
   </div>
  </div>
@@ -189,16 +194,30 @@ function showTab(t){
   $('tab-logs').classList.toggle('hide', t!=='logs');
   $('tab-btn-config').classList.toggle('active', t==='config');
   $('tab-btn-logs').classList.toggle('active', t==='logs');
-  if(t==='logs'){ loadLogs(); startLogAuto(); } else { stopLogAuto(); }
+  if(t==='logs'){ loadReviewLogList(); loadLogs(); startLogAuto(); } else { stopLogAuto(); }
 }
-async function loadLogs(){
+async function loadReviewLogList(){
   try {
-    const r = await fetch('/logs').then(r=>r.json());
-    $('logpath').textContent = r.path ? ('· '+r.path) : '';
+    const r = await fetch('/review-logs').then(r=>r.json());
+    const sel=$('logsel'); const cur=sel.value;
+    sel.innerHTML='<option value="">客户端运行日志</option>' + (r.logs||[]).map(x=>{
+      const t=new Date(x.mtime).toLocaleString('zh-CN',{hour12:false});
+      return `<option value="${esc(x.file)}">review · ${esc(x.file.replace(/^pr-/,'PR#').replace(/\.log$/,''))} (${t})</option>`;
+    }).join('');
+    if(cur && [...sel.options].some(o=>o.value===cur)) sel.value=cur;
+  } catch(e){}
+}
+function onLogSel(){ loadLogs(); }
+async function loadLogs(){
+  const sel = $('logsel') ? $('logsel').value : '';
+  const url = sel ? ('/review-log?file='+encodeURIComponent(sel)) : '/logs';
+  try {
+    const r = await fetch(url).then(r=>r.json());
+    $('logpath').textContent = sel ? ('· '+sel) : (r.path ? ('· '+r.path) : '');
     const box=$('logbox');
     const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
     box.textContent = r.log || '(暂无日志)';
-    if(atBottom) box.scrollTop = box.scrollHeight;
+    box.scrollTop = sel ? 0 : (atBottom ? box.scrollHeight : box.scrollTop); // 运行日志贴底, review日志看头部
   } catch(e){ $('logbox').textContent='读取日志失败: '+e.message; }
 }
 function startLogAuto(){ stopLogAuto(); if($('logauto') && $('logauto').checked) logTimer=setInterval(loadLogs, 3000); }
