@@ -284,6 +284,42 @@ function connect() {
 
 // ---------- 本机配置页(127.0.0.1, 编辑 ~/.lark-review-client.json)----------
 const CONFIG_PAGE = path.join(__dirname, 'config-page.html');
+// 运行日志路径(run-client.sh 会 export; launchd 走 StandardOutPath, 默认与之一致)。
+const LOG_PATH = process.env.LARK_REVIEW_CLIENT_LOG || path.join(os.homedir(), '.lark-review-client.log');
+
+// 读日志尾部(最多末 maxBytes 字节 / maxLines 行), 供配置页"日志"tab 展示。
+function tailLog(maxBytes = 65536, maxLines = 500) {
+  try {
+    const st = fs.statSync(LOG_PATH);
+    const start = Math.max(0, st.size - maxBytes);
+    const fd = fs.openSync(LOG_PATH, 'r');
+    const buf = Buffer.alloc(st.size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    fs.closeSync(fd);
+    let lines = buf.toString('utf8').split('\n');
+    if (start > 0 && lines.length) lines = lines.slice(1); // 丢弃可能被截断的首行
+    return lines.slice(-maxLines).join('\n');
+  } catch (e) {
+    return `(暂无日志文件: ${LOG_PATH}\n${e.code || e.message}\n若是前台直接 node 运行, 日志在终端而非文件。)`;
+  }
+}
+
+// 重启本进程。受 launchd/systemd 监管时直接退出(由其拉起); 否则自我 re-exec。
+function doRestart() {
+  if (process.env.LARK_REVIEW_CLIENT_SUPERVISED === '1') {
+    log('restart: 退出, 由 launchd/systemd 自动拉起');
+    setTimeout(() => process.exit(0), 300);
+    return;
+  }
+  log('restart: 自我重启(re-exec)');
+  try {
+    const child = spawn(process.execPath, process.argv.slice(1), { detached: true, stdio: 'inherit', env: process.env });
+    child.unref();
+    const pidf = process.env.LARK_REVIEW_CLIENT_PID;
+    if (pidf) { try { fs.writeFileSync(pidf, String(child.pid)); } catch { /* ignore */ } }
+  } catch (e) { logErr('re-exec failed:', e.message); }
+  setTimeout(() => process.exit(0), 500);
+}
 
 // 只写技术性字段; name / openId 归服务端下发, 永不写入本地配置。
 function persistConfig(incoming) {
@@ -353,10 +389,23 @@ function startConfigServer() {
       });
       return;
     }
+    if (req.method === 'GET' && u === '/logs') {
+      return json(200, { path: LOG_PATH, log: tailLog() });
+    }
+    if (req.method === 'POST' && u === '/restart') {
+      json(200, { ok: true });
+      doRestart();
+      return;
+    }
     res.writeHead(404); res.end('not found');
   });
-  srv.on('error', (e) => logErr('config server:', e.message));
-  srv.listen(port, '127.0.0.1', () => log(`配置页: http://127.0.0.1:${port}`));
+  // 端口被占(常见于自我重启时旧进程尚未释放)→ 1s 后重试, 最多若干次。
+  srv.on('error', (e) => {
+    if (e.code === 'EADDRINUSE') { logErr(`配置页端口 ${port} 占用, 1s 后重试…`); setTimeout(() => srv.listen(port, '127.0.0.1'), 1000); }
+    else logErr('config server:', e.message);
+  });
+  srv.on('listening', () => log(`配置页: http://127.0.0.1:${port}`));
+  srv.listen(port, '127.0.0.1');
 }
 
 startConfigServer();   // 配置页先起(无论是否已配置), 供首次填写 / 后续修改

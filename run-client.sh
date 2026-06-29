@@ -40,6 +40,8 @@ do_start() {
     echo "⚠️ 配置 $CONFIG 不存在 —— 先以「仅配置页」模式启动,"
     echo "   启动后浏览器打开 http://127.0.0.1:8790 在网页里填写并保存即可。"
   fi
+  # 传给 client: 日志路径(供配置页"日志"tab)+ pidfile(供"重启"时更新)。
+  export LARK_REVIEW_CLIENT_LOG="$LOGFILE" LARK_REVIEW_CLIENT_PID="$PIDFILE"
   nohup "$node" "$SCRIPT" "$CONFIG" </dev/null >>"$LOGFILE" 2>&1 &
   local pid=$!; echo "$pid" > "$PIDFILE"; disown "$pid" 2>/dev/null || true
   sleep 1.5
@@ -76,6 +78,10 @@ case "${1:-}" in
   restart) do_stop; sleep 1; do_start ;;
   status)  do_status ;;
   logs)    tail -f "$LOGFILE" ;;
-  fg)      node=$(find_node); [[ -z "$node" ]] && { echo "找不到 node"; exit 1; }; exec "$node" "$SCRIPT" "$CONFIG" ;;
+  fg)      # 前台运行(给 launchd/systemd 用): 标记受监管, 退出由监管者拉起。
+           node=$(find_node); [[ -z "$node" ]] && { echo "找不到 node"; exit 1; }
+           export LARK_REVIEW_CLIENT_SUPERVISED=1
+           export LARK_REVIEW_CLIENT_LOG="${LARK_REVIEW_CLIENT_LOG:-$LOGFILE}"
+           exec "$node" "$SCRIPT" "$CONFIG" ;;
   *) echo "用法: $0 {start|stop|restart|status|logs|fg} [config.json]"; exit 1 ;;
 esac

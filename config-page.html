@@ -31,11 +31,26 @@
   .err { color:var(--err); } .ok { color:var(--ok); } .muted{ color:var(--mut); }
   .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#222632; border:1px solid var(--line); padding:10px 16px; border-radius:8px; opacity:0; transition:opacity .2s; }
   .toast.show { opacity:1; }
+  button.danger { color:var(--err); border-color:#4a2630; background:#2a1a1f; }
+  .tabs { display:flex; gap:4px; padding:0 24px; border-bottom:1px solid var(--line); max-width:760px; margin:0 auto; }
+  .tab { border:none; background:none; color:var(--mut); padding:12px 14px; border-bottom:2px solid transparent; border-radius:0; }
+  .tab.active { color:var(--fg); border-bottom-color:var(--acc); }
+  .hide { display:none; }
+  .logbox { background:#0b0d11; border:1px solid var(--line); border-radius:8px; padding:12px; max-height:62vh; overflow:auto; white-space:pre-wrap; word-break:break-all; font:12px/1.5 ui-monospace,Menlo,monospace; color:#c8cdd6; margin:0; }
 </style>
 </head>
 <body>
-<header><h1>🧑‍💻 Review Client 配置</h1><span class="muted" id="ver"></span></header>
+<header>
+  <h1>🧑‍💻 Review Client</h1><span class="muted" id="ver"></span>
+  <span style="flex:1"></span>
+  <button class="sm danger" onclick="doRestart()">↻ 重启服务</button>
+</header>
+<div class="tabs">
+  <button id="tab-btn-config" class="tab active" onclick="showTab('config')">配置</button>
+  <button id="tab-btn-logs" class="tab" onclick="showTab('logs')">日志</button>
+</div>
 <main>
+ <div id="tab-config">
   <div class="card">
     <h2>身份(由服务端分配,不可改)</h2>
     <div class="idrow">
@@ -87,6 +102,19 @@
     <button class="acc" onclick="save()">保存并应用(热重载)</button>
     <span id="msg"></span>
   </div>
+ </div><!-- /tab-config -->
+
+ <div id="tab-logs" class="hide">
+  <div class="card">
+    <h2>客户端日志 <span class="muted" id="logpath"></span></h2>
+    <div style="display:flex; gap:10px; margin-bottom:10px; align-items:center">
+      <button class="sm" onclick="loadLogs()">刷新</button>
+      <label class="muted" style="margin:0; display:flex; align-items:center; gap:5px"><input type="checkbox" id="logauto" checked onchange="startLogAuto()" style="width:auto"> 自动刷新(3s)</label>
+      <span class="muted">显示最近日志(含派单 / claude 退出码 / 连接事件)</span>
+    </div>
+    <pre id="logbox" class="logbox">加载中…</pre>
+  </div>
+ </div>
 </main>
 <div id="toast" class="toast"></div>
 
@@ -154,6 +182,40 @@ async function save(){
     else $('msg').innerHTML='<span class="err">'+esc(r.error||'保存失败')+'</span>';
   } catch(e){ $('msg').innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
 }
+// ---- tab 切换 ----
+let logTimer=null;
+function showTab(t){
+  $('tab-config').classList.toggle('hide', t!=='config');
+  $('tab-logs').classList.toggle('hide', t!=='logs');
+  $('tab-btn-config').classList.toggle('active', t==='config');
+  $('tab-btn-logs').classList.toggle('active', t==='logs');
+  if(t==='logs'){ loadLogs(); startLogAuto(); } else { stopLogAuto(); }
+}
+async function loadLogs(){
+  try {
+    const r = await fetch('/logs').then(r=>r.json());
+    $('logpath').textContent = r.path ? ('· '+r.path) : '';
+    const box=$('logbox');
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+    box.textContent = r.log || '(暂无日志)';
+    if(atBottom) box.scrollTop = box.scrollHeight;
+  } catch(e){ $('logbox').textContent='读取日志失败: '+e.message; }
+}
+function startLogAuto(){ stopLogAuto(); if($('logauto') && $('logauto').checked) logTimer=setInterval(loadLogs, 3000); }
+function stopLogAuto(){ if(logTimer){ clearInterval(logTimer); logTimer=null; } }
+
+// ---- 重启服务 ----
+async function doRestart(){
+  if(!confirm('重启 review client 服务? 会短暂断开, 之后自动重连。')) return;
+  toast('正在重启…');
+  try { await fetch('/restart',{method:'POST'}); } catch(e){ /* 进程退出, 连接断开属正常 */ }
+  let n=0; const t=setInterval(async()=>{
+    n++;
+    try { await fetch('/status'); toast('已重启 ✓'); refreshStatus(); if(!$('tab-logs').classList.contains('hide')) loadLogs(); clearInterval(t); }
+    catch(e){ if(n>25){ clearInterval(t); toast('重启后未恢复, 请检查终端/launchd'); } }
+  }, 1000);
+}
+
 load();
 setInterval(refreshStatus, 4000);
 </script>

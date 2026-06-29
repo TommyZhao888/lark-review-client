@@ -38,6 +38,9 @@
     <string>/Users/YOU</string>
     <key>LARK_REVIEW_CLIENT_CONFIG</key>
     <string>/Users/YOU/.lark-review-client.json</string>
+    <!-- 让配置页"日志"tab 读到 launchd 的输出文件(与下面 StandardOutPath 保持一致) -->
+    <key>LARK_REVIEW_CLIENT_LOG</key>
+    <string>/Users/YOU/.lark-review-client.log</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/YOU/.local/bin</string>
   </dict>
