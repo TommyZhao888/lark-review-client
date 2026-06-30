@@ -20,8 +20,21 @@ const fs = require('fs');
 const os = require('os');
 const http = require('http');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const WebSocket = require('ws');
+
+// 上报主机名: macOS 上 os.hostname() 常因网络反查返回 "bogon"(多台机器会撞名),
+// 优先取用户在"系统设置"里设的稳定机器名 ComputerName, 取不到再回退 os.hostname()。
+function detectHostname() {
+  const h = os.hostname();
+  if (process.platform === 'darwin' && (!h || h === 'bogon' || h === 'localhost')) {
+    try {
+      const n = execSync('scutil --get ComputerName', { encoding: 'utf8', timeout: 2000 }).trim();
+      if (n) return n;
+    } catch { /* 忽略, 回退 os.hostname() */ }
+  }
+  return h;
+}
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
 const CLIENT_VERSION = '1.0.0';
@@ -261,7 +274,7 @@ function connect() {
     send({
       type: 'register',
       token: cfg.token,
-      hostname: os.hostname(),
+      hostname: detectHostname(),
       repos: Object.keys(cfg.repos),
       version: CLIENT_VERSION,
     });
