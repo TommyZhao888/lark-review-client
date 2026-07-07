@@ -25,7 +25,7 @@ npm install
 日志出现 `配置页: http://127.0.0.1:8790` 即可。
 
 ## 3. 找管理员要接入信息
-向管理员索取: **serverUrl**(hub 地址, 需和管理员同一办公网)+ 你的 **token**。
+向管理员索取: **serverUrl**(生产为 `wss://review.ilaot.com`, 经 Cloudflare 隧道, **任意能上网的网络都可连, 不用和服务器同一内网**)+ 你的 **token**。
 
 ## 4. 打开网页配置
 浏览器开 **http://127.0.0.1:8790** , 填:
@@ -56,6 +56,7 @@ git pull && npm install && ./run-client.sh restart
 后 `launchctl load`(macOS)。不弄也行, 开机手动 `./run-client.sh start`。
 
 ## 排查
-- 连不上: 确认和管理员同一办公网; token/serverUrl 没填错; 管理员 hub 开着。`./run-client.sh logs` 看报错。
+- 连不上: serverUrl 用 `wss://review.ilaot.com`、token 没填错、本机能正常上网; 管理员 hub 开着。`./run-client.sh logs` 看报错。
+- `注册被拒: bad_token`(token 对不上, 比如被管理员重置): 客户端不会退出, 直接开 http://127.0.0.1:8790 填新 token 保存即可(自动重连)。
 - review 失败: 日志看 `claude exited=...`; 多半是 claude 未登录 / 模型无权限 / gh 没该 repo 权限。
 - 字段详解见 README.md。

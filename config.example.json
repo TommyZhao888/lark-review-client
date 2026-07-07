@@ -1,5 +1,5 @@
 {
-  "serverUrl": "ws://hub-host:8788  (向管理员索取; 本机自测可用 ws://127.0.0.1:8788)",
+  "serverUrl": "wss://review.ilaot.com  (生产, 经 Cloudflare 隧道, 任意网络可连; 本机自测才用 ws://127.0.0.1:8788)",
   "token": "向管理员索取, 与你绑定的长随机串",
 
   "reviewModel": "claude-opus-4-8",

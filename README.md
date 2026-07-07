@@ -2,7 +2,7 @@
 
 团队 PR Review 客户端。在**你自己的机器**上跑，连**你自己的 Claude**，由团队的 Lark 机器人驱动。
 
-谁在 Lark 里对 PR 卡片打 SLAP 表情 / 点「再来一轮」，服务端就把这次 review 派给**他本人**的客户端执行：在你本机建 git worktree、跑 `claude /pr-review`、把 inline / general comment 提交到 GitHub（用你自己的 Claude 账号），结论回传给服务端由机器人发回 Lark 线程。
+当有 PR 分配给你 review(或你被 `@` 指定、你自己在卡片里点触发)时，服务端就把这次 review 派给**你本人**的客户端执行：在你本机建 git worktree、跑 `claude /pr-review`、把 inline / general comment 提交到 GitHub（用你自己的 Claude 账号），结论回传给服务端由机器人发回 Lark 线程。你不在线时服务端则照常 `@` 你人工催办。
 
 ## 前置要求
 
@@ -38,8 +38,8 @@ npm install
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `serverUrl` | ✅ | 服务端 review-hub 地址，向管理员索取（本机自测 `ws://127.0.0.1:8788`）|
-| `token` | ✅ | 与你绑定的鉴权串，向管理员索取 |
+| `serverUrl` | ✅ | 服务端 review-hub 地址。生产环境用 **`wss://review.ilaot.com`**（经 Cloudflare 隧道，任意能上网的网络都能连，**不需要和服务器同一内网**）；本机自测才用 `ws://127.0.0.1:8788`。以管理员告知为准 |
+| `token` | ✅ | 与你绑定的鉴权串，向管理员索取。管理员若重置了你的 token，按下方「注册被拒」在配置页换新值即可 |
 | `repos` | ✅ | `"owner/repo": { mainRepo, worktreeBase }` 映射。`mainRepo` 是你本机的 clone 路径，`worktreeBase` 是放临时 worktree 的目录（会自动创建 `pr-<N>` 子目录）|
 | `reviewModel` | | claude 模型，默认 `claude-opus-4-8`（必须你账号有权限）|
 | `claudePath` | | claude 可执行路径，默认 `claude` |
@@ -69,6 +69,12 @@ npm install
 ```bash
 node lark-review-client.js [config.json]
 ```
+
+### 注册被拒（`bad_token`，比如管理员重置了 token）
+
+日志出现 `注册被拒: bad_token`（token 和服务端名单对不上）时，客户端**不会退出**，只是
+暂停重连、保持运行。**直接打开配置页 `http://127.0.0.1:8790/`，把管理员给你的新 token
+填进去保存**（会自动按新配置重连），无需重启进程。
 
 ### 开机自启（可选，重启后自动拉起）
 
