@@ -121,8 +121,9 @@ IMPORTANT: this is a one-shot headless run. The process terminates the moment yo
 After completing, output a single final line in this exact format:
 ___RESULT___ verdict=<APPROVE|COMMENT|REQUEST_CHANGES> general_comment_url=<url-or-NONE> inline_count=<integer>`;
 
-function renderPrompt(prNum, worktreePath, ciStatus) {
-  const tmpl = cfg.promptOverride || DEFAULT_PROMPT_TEMPLATE;
+function renderPrompt(prNum, worktreePath, ciStatus, serverTmpl) {
+  // 优先级: 本地 promptOverride > 服务端该 repo 的 prompt(review_job 下发) > 内置默认模板。
+  const tmpl = cfg.promptOverride || serverTmpl || DEFAULT_PROMPT_TEMPLATE;
   return tmpl
     .replaceAll('{{PR_NUM}}', String(prNum))
     .replaceAll('{{WORKTREE_PATH}}', worktreePath)
@@ -217,7 +218,7 @@ async function runReviewJob(job) {
   const ciStatus = job.ci_failed_names
     ? `${job.ci_overall}; failed checks: ${job.ci_failed_names}`
     : job.ci_overall;
-  const prompt = renderPrompt(job.pr_num, wt.worktreePath, ciStatus);
+  const prompt = renderPrompt(job.pr_num, wt.worktreePath, ciStatus, job.prompt_template);
   const model = job.review_model || cfg.reviewModel;
 
   send({ type: 'review_progress', job_id: job.job_id, stage: 'claude' });
