@@ -259,6 +259,7 @@ let ws = null;
 let hbTimer = null;
 let reconnectDelay = 1000;
 let connected = false, registered = false;
+let halted = false;   // 注册被拒(bad_token 等)时置真: 暂停自动重连, 但保活配置页供改 token
 let identity = { open_id: null, name: null, recommended_version: null };
 
 function send(obj) { try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch {} }
@@ -287,6 +288,7 @@ function connect() {
     switch (msg.type) {
       case 'register_ack':
         registered = true;
+        halted = false;
         identity = { open_id: msg.open_id, name: msg.name, recommended_version: msg.recommended_version || null };
         log(`registered as ${msg.name} (${msg.open_id}) ✓  本机 v${CLIENT_VERSION}，服务端推荐 v${msg.recommended_version || '?'}`);
         if (msg.upgrade) {
@@ -297,9 +299,22 @@ function connect() {
           logErr('=============================================================');
         }
         break;
-      case 'register_reject':
-        fail(`服务端拒绝注册: ${msg.reason}（检查 token / open_id）`);
+      case 'register_reject': {
+        // 不再 process.exit —— 那会连配置页一起杀掉, 用户就没法改 token 了(鸡生蛋)。
+        // 改为: 停止自动重连 + 保活配置页, 引导用户去配置页改 token。
+        halted = true;
+        registered = false;
+        const _cp = cfg.configPort || 8790;
+        logErr('======================== 注册被拒 ========================');
+        logErr(`  服务端拒绝注册: ${msg.reason}(token / open_id 不对)`);
+        logErr('  已【暂停自动重连】, 但客户端仍在运行 —— 请打开配置页改 token:');
+        logErr(`    http://127.0.0.1:${_cp}/`);
+        logErr('  在页面填入新 token 保存(会自动按新配置重连)即可。');
+        logErr('=========================================================');
+        if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+        try { ws.close(); } catch { /* ignore */ }
         break;
+      }
       case 'review_job':
         log(`got review_job ${msg.job_id} pr=#${msg.pr_num} repo=${msg.repo} branch=${msg.branch}`);
         queue.push(msg);
@@ -319,6 +334,10 @@ function connect() {
   ws.on('close', () => {
     connected = false; registered = false;
     if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+    if (halted) {
+      logErr(`已暂停自动重连(等待改 token)。配置页: http://127.0.0.1:${cfg.configPort || 8790}/`);
+      return;
+    }
     logErr(`disconnected; reconnecting in ${reconnectDelay}ms`);
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30000);
@@ -389,6 +408,7 @@ function persistConfig(incoming) {
 }
 
 function reloadAndReconnect() {
+  halted = false;   // 用户在配置页重新配置 → 解除暂停, 恢复正常(重连/后续断线自动重连)
   cfg = loadConfig();
   if (!configReady(cfg)) { log('配置仍不完整(缺 serverUrl/token/repos), 暂不连接'); return; }
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
