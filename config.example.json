@@ -1,5 +1,5 @@
 {
-  "serverUrl": "wss://review.ilaot.com  (生产, 经 Cloudflare 隧道, 任意网络可连; 本机自测才用 ws://127.0.0.1:8788)",
+  "serverUrl": "ws://hub-host:8788  (向管理员索取; 本机自测可用 ws://127.0.0.1:8788)",
   "token": "向管理员索取, 与你绑定的长随机串",
 
   "reviewModel": "claude-opus-4-8",
@@ -11,11 +11,11 @@
   "repos": {
     "Liontech-tw/lion-trip-app-global": {
       "mainRepo": "/Users/you/Source/lion-trip-app-global",
-      "worktreeBase": "/Users/you/Source/lion-trip-app-global-worktrees"
+      "worktreeBase": "/Users/you/Source/lion-trip-app-global-worktrees",
+      "prompt": null
     }
   },
 
-  "promptOverride": null,
-
-  "_note": "无需填 name / openId —— 连上服务端后由服务端按 token 自动下发。也可不手写本文件, 直接开 http://127.0.0.1:8790 用网页配置。"
+  "_note": "无需填 name / openId —— 连上服务端后由服务端按 token 自动下发。也可不手写本文件, 直接开 http://127.0.0.1:8790 用网页配置。",
+  "_note_repos": "可参与的项目清单由服务端下发(管理员在 hub「Repo 规则」配置)。推荐流程: repos 先留空 {}, 填好 serverUrl/token 启动, 到配置页从下拉列表添加项目并填本机路径。提示词按项目配 repos[].prompt(仅本机生效), 留空 = 服务端为该项目配的默认 > 内置默认模板。手写时 repo 名必须与服务端清单一致, 否则不会被派单。"
 }

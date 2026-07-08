@@ -2,7 +2,7 @@
 
 团队 PR Review 客户端。在**你自己的机器**上跑，连**你自己的 Claude**，由团队的 Lark 机器人驱动。
 
-当有 PR 分配给你 review(或你被 `@` 指定、你自己在卡片里点触发)时，服务端就把这次 review 派给**你本人**的客户端执行：在你本机建 git worktree、跑 `claude /pr-review`、把 inline / general comment 提交到 GitHub（用你自己的 Claude 账号），结论回传给服务端由机器人发回 Lark 线程。你不在线时服务端则照常 `@` 你人工催办。
+谁在 Lark 里对 PR 卡片打 SLAP 表情 / 点「再来一轮」，服务端就把这次 review 派给**他本人**的客户端执行：在你本机建 git worktree、跑 `claude /pr-review`、把 inline / general comment 提交到 GitHub（用你自己的 Claude 账号），结论回传给服务端由机器人发回 Lark 线程。
 
 ## 前置要求
 
@@ -13,23 +13,38 @@
 - **gh**（`gh auth login` 已登录，有目标 repo 权限）
 - **claude**（`claude /login` 已登录，账号对 `reviewModel` 有权限）
 
-> 新手直接看 [QUICKSTART.md](QUICKSTART.md) 跟着做即可。
+**参与 Azure DevOps 项目时额外需要**：
+
+- 本机能访问公司 ADO Server（内网），clone 时 `origin` 指向 ADO 仓库地址
+- PAT：`export AZURE_DEVOPS_EXT_PAT=<你的PAT>`（scope 至少 Code Read & Write），
+  建议写进 shell profile；launchd 自启的把它加进 plist 的 EnvironmentVariables
+- 安装 `/pr-review-azdo` claude 命令：`cp docs/pr-review-azdo.md ~/.claude/commands/pr-review-azdo.md`
+  （见服务端仓库 docs/，向管理员索取）
+- 可选：`az` CLI + `az extension add --name azure-devops`（命令里投票操作优先用它，没有则走 REST）
 
 ## 安装
+
+**推荐 `git clone`**（这样才能用「一键自动更新」）：
 
 ```bash
 git clone https://github.com/TommyZhao888/lark-review-client.git
 cd lark-review-client
 npm install
 ```
-然后 `./run-client.sh start` 启动, 打开 http://127.0.0.1:8790 在网页里配置(推荐);
-或手动 `cp config.example.json ~/.lark-review-client.json` 再编辑。
+
+> 之后配置**推荐用网页**（见下节），不必手动建配置文件。若想手动：
+> `cp config.example.json ~/.lark-review-client.json` 再编辑（字段见下表）。
 
 ## 配置（推荐用网页）
 
 启动客户端后,浏览器开 **`http://127.0.0.1:8790/`** 就能在网页里配置 claude 路径、模型、
-项目(repos)的本机 clone / worktree 目录、serverUrl、token、**review 提示词**(可一键填入默认模板再改)，
-**保存即热重载**(自动按新配置重连)。
+serverUrl、token，**保存即热重载**(自动按新配置重连)。
+
+**项目(repos)由服务端清单驱动**：可参与的项目由管理员在服务端 hub「Repo 规则」里配置，
+客户端连上后自动下发。首次使用只需先填 serverUrl + token 保存，连上后配置页的**下拉列表**
+会列出服务端受管的项目——选择添加，填该项目在你本机的 clone 路径（worktree 目录留空自动按
+`<clone路径>-worktrees` 补全）。**提示词按项目在本机单独配置**（只影响你自己的 client），
+留空则依次回退：服务端为该项目配的默认 → 内置默认模板。
 你的**姓名和 open_id 不用填**——连上服务端后由管理员在服务端设定并自动下发,网页上只读显示。
 
 也可以手动编辑 `~/.lark-review-client.json`（字段见下表）。
@@ -38,17 +53,16 @@ npm install
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `serverUrl` | ✅ | 服务端 review-hub 地址。生产环境用 **`wss://review.ilaot.com`**（经 Cloudflare 隧道，任意能上网的网络都能连，**不需要和服务器同一内网**）；本机自测才用 `ws://127.0.0.1:8788`。以管理员告知为准 |
-| `token` | ✅ | 与你绑定的鉴权串，向管理员索取。管理员若重置了你的 token，按下方「注册被拒」在配置页换新值即可 |
-| `repos` | ✅ | `"owner/repo": { mainRepo, worktreeBase }` 映射。`mainRepo` 是你本机的 clone 路径，`worktreeBase` 是放临时 worktree 的目录（会自动创建 `pr-<N>` 子目录）|
+| `serverUrl` | ✅ | 服务端 review-hub 地址，向管理员索取（本机自测 `ws://127.0.0.1:8788`）|
+| `token` | ✅ | 与你绑定的鉴权串，向管理员索取 |
+| `repos` | | `"owner/repo": { mainRepo, worktreeBase, prompt? }` 映射。repo 名必须在服务端受管清单里（推荐直接在配置页从下拉列表添加）。`mainRepo` 是你本机的 clone 路径，`worktreeBase` 是放临时 worktree 的目录（会自动创建 `pr-<N>` 子目录），`prompt` 是该项目的本机提示词（可选，优先于服务端默认；支持占位符 `{{PR_NUM}}` `{{WORKTREE_PATH}}` `{{CI_STATUS}}`）。可先留空 `{}`，连上后再配 |
 | `reviewModel` | | claude 模型，默认 `claude-opus-4-8`（必须你账号有权限）|
 | `claudePath` | | claude 可执行路径，默认 `claude` |
 | `configPort` | | 本机配置页端口，默认 `8790` |
-| `promptOverride` | | 自定义 review prompt 模板，支持占位符 `{{PR_NUM}}` `{{WORKTREE_PATH}}` `{{CI_STATUS}}`。留 `null` 用默认模板 |
 | `worktreeMaxAgeDays` | | 超过这个天数没动过的 worktree 自动清理，默认 14 |
 
 > **`name` / `openId` 不用配**：连上服务端后按 token 自动下发，你也改不了（防冒名）。
-> 你可以配置多个 repo；只有你配了的 repo，服务端才会把对应 PR 派给你。
+> 你可以启用多个 repo；只有服务端受管且你启用了的 repo，服务端才会把对应 PR 派给你。
 
 ## 运行（推荐用 run-client.sh）
 
@@ -70,18 +84,24 @@ npm install
 node lark-review-client.js [config.json]
 ```
 
-### 注册被拒（`bad_token`，比如管理员重置了 token）
-
-日志出现 `注册被拒: bad_token`（token 和服务端名单对不上）时，客户端**不会退出**，只是
-暂停重连、保持运行。**直接打开配置页 `http://127.0.0.1:8790/`，把管理员给你的新 token
-填进去保存**（会自动按新配置重连），无需重启进程。
-
 ### 开机自启（可选，重启后自动拉起）
 
 - **macOS（launchd）**：照 `com.larkbot.review-client.plist.example` 的注释改好路径，
   `cp` 到 `~/Library/LaunchAgents/` 后 `launchctl load`。它用 `KeepAlive`，崩溃会自动重启。
 - **Linux（systemd）/ 其它**：用 `run-client.sh fg` 作为前台命令挂到 systemd service / supervisor。
 - 不想自启的话，`./run-client.sh start` 就够日常用（只是重启电脑后要手动再 start）。
+
+### 菜单栏状态（可选，macOS）
+
+装 [SwiftBar](https://github.com/swiftbar/SwiftBar) 后菜单栏常驻一个 🦁 图标，一眼看到在线/在跑/有新版本，并可一键更新：
+
+```bash
+brew install --cask swiftbar      # 首次打开 SwiftBar 会让你选一个"插件目录"
+# 把插件软链进该插件目录（文件名保留 *.5s.sh = 每 5 秒刷新）：
+ln -sf "$PWD/lionreview.5s.sh" "<SwiftBar 插件目录>/lionreview.5s.sh"
+```
+
+图标含义：🦁🟢 在线待命 · 🦁⚡N 在跑 N 单 · 🦁🔴 离线/未注册 · 🦁⚪️ client 没起；末尾带 **🆙 = 有新版本**。点开下拉能看正在 review 的 PR，以及 **「一键更新并重启」**。配置页端口非默认 `8790` 时，改插件里的 `PORT` 或设环境变量 `LARK_REVIEW_CLIENT_CONFIG_PORT`。
 
 ## 它会做 / 不会做什么
 
@@ -92,11 +112,22 @@ node lark-review-client.js [config.json]
 - ❌ 不碰 Lark、不写服务端状态——那些都在服务端做
 - ❌ 一次只跑一单（本机串行，避免多个 claude 抢资源）
 
-## 升级
+## 升级 / 自动更新
 
-服务端会记录「推荐客户端版本」。你的客户端连上时若版本偏低，启动日志会打印醒目的
-`请升级客户端` 提示（含升级方式），管理员在 Lark `@机器人 在线` 也能看到你被标 `⚠️需升级`。
-升级方式取决于分发形式（最常见：在客户端目录 `git pull && npm install` 然后重启）。
+服务端记录「推荐客户端版本」。你的 client 连上时若版本偏低，有三处提醒 + 两处可一键更新：
+
+- **配置页**（`http://127.0.0.1:8790/`）顶部「客户端版本」卡显示 🆙 有新版本，点 **「一键更新并重启」** → 自动 `git pull` + `npm install --omit=dev` + 重启（几秒后自动重连）。
+- **菜单栏**图标显示 🆙，下拉点 **「一键更新并重启」**，同效。
+- **启动日志**打印醒目的 `请升级客户端`；管理员在 Lark `@机器人 在线` 也能看到你被标 `⚠️需升级`。
+
+> **自动更新的前提**：客户端目录是 `git clone` 来的 git 仓库（能 `git pull`）。若不是（如手动复制的文件夹），一键更新会失败并**直接显示手动更新步骤**：
+>
+> ```bash
+> cd <客户端目录>
+> git pull            # 或从 https://github.com/TommyZhao888/lark-review-client 下载最新，覆盖本目录
+> npm install --omit=dev
+> ./run-client.sh restart
+> ```
 
 ## 安全
 

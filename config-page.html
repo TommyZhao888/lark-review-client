@@ -68,6 +68,20 @@
   </div>
 
   <div class="card">
+    <h2>客户端版本 <span class="muted" id="uState"></span></h2>
+    <div class="idrow">
+      <div><span>当前</span><b id="uCur">—</b></div>
+      <div><span>服务端推荐</span><b id="uRec">—</b></div>
+    </div>
+    <div id="uBanner" style="margin-top:8px"></div>
+    <div style="margin-top:10px; display:flex; gap:10px; align-items:center">
+      <button class="acc" id="uBtn" onclick="doSelfUpdate()" style="display:none">一键更新并重启</button>
+      <span id="uMsg" class="muted"></span>
+    </div>
+    <pre id="uSteps" class="logbox" style="display:none; margin-top:10px; max-height:40vh"></pre>
+  </div>
+
+  <div class="card">
     <h2>连接</h2>
     <label>服务端地址 serverUrl</label>
     <input id="serverUrl" class="mono" placeholder="ws://hub-host:8788 (向管理员索取)">
@@ -243,10 +257,51 @@ async function refreshStatus(){
       + (s.registered?' · 已注册':'');
     $('iName').textContent = s.name||'—'; $('iOid').textContent = s.open_id||'—';
     $('connHint').textContent = s.connected ? (s.recommended_version?('服务端推荐客户端 v'+s.recommended_version):'') : '连上服务端后会自动显示你的姓名/open_id。检查 serverUrl 与 token。';
+    // 版本/更新卡
+    $('uCur').textContent = 'v'+(s.client_version||'?');
+    $('uRec').textContent = s.recommended_version ? ('v'+s.recommended_version) : '—';
+    if (!updBusy) {
+      const b=$('uBanner'), btn=$('uBtn'), st=$('uState');
+      if (s.outdated && s.upgrade) {
+        st.textContent = '· 有新版本'; st.className='err';
+        b.innerHTML = `🆙 有新版本 <b>v${esc(s.upgrade.recommended)}</b>(当前 v${esc(s.client_version)})，建议更新。`
+          + (s.upgrade.below_min?` <span class="err">已低于最低要求 v${esc(s.upgrade.min)}，可能不兼容</span>`:'')
+          + (s.upgrade.message?`<br><span class="muted">${esc(s.upgrade.message)}</span>`:'');
+        btn.style.display='';
+      } else {
+        st.textContent = s.connected ? '· 已是最新' : ''; st.className='muted';
+        b.textContent=''; btn.style.display='none';
+      }
+    }
     // 服务端清单数量变化(刚连上/管理员改了 Repo 规则) → 未动过项目区时自动重渲染。
     const mc = Number(s.managed_repo_count||0);
     if (mc !== lastManagedCount && !reposDirty) reloadRepos();
   } catch(e){}
+}
+let updBusy = false;
+async function doSelfUpdate(){
+  const btn=$('uBtn'), msg=$('uMsg'), steps=$('uSteps');
+  updBusy=true; btn.disabled=true; msg.textContent='更新中(git pull + 依赖 + 重启)…'; steps.style.display='none';
+  try {
+    const r = await fetch('/self-update',{method:'POST'}).then(x=>x.json());
+    if (r.ok && r.changed) { msg.textContent = r.message||'更新成功，正在重启…'; pollAfterUpdate(); return; }
+    if (r.ok && !r.changed) { updBusy=false; btn.disabled=false; msg.textContent = r.message||'已是最新。'; return; }
+    // 自动更新失败 → 显示手动步骤
+    updBusy=false; btn.disabled=false;
+    msg.textContent = '自动更新失败'+(r.detail?('：'+r.detail):'')+' —— 请按下列步骤手动更新：';
+    steps.textContent = (r.steps||[]).join('\n'); steps.style.display='block';
+  } catch(e){ updBusy=false; btn.disabled=false; msg.textContent='请求失败：'+e.message; }
+}
+function pollAfterUpdate(){
+  let n=0; const t=setInterval(async()=>{
+    n++; $('uMsg').textContent='重启中…('+(n*2)+'s)';
+    try { const s=await fetch('/status').then(x=>x.json());
+      if (s && s.client_version && s.registered && !s.outdated) {
+        clearInterval(t); updBusy=false; $('uBtn').disabled=false; $('uMsg').textContent='已更新到 v'+s.client_version; refreshStatus();
+      }
+    } catch { /* 重启期间断连, 继续等 */ }
+    if (n>=30){ clearInterval(t); updBusy=false; $('uBtn').disabled=false; $('uMsg').textContent='重启超时，请手动刷新确认。'; }
+  }, 2000);
 }
 function collect(){
   const repos={};

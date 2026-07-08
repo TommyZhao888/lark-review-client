@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.1.0';
+const CLIENT_VERSION = '1.3.0';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -77,6 +77,17 @@ function fail(msg)    { console.error('[client] FATAL:', msg); process.exit(1); 
 
 let cfg = loadConfig();
 log(`config ${CONFIG_PATH} loaded, repos: ${Object.keys(cfg.repos || {}).join(', ') || '(无)'} (身份由服务端按 token 下发)`);
+
+// ---------- Mac 通知栏提醒(收到/执行中/完成/断连/重连); 非 macOS 或 cfg.notify=false 时跳过 ----------
+function notify(title, message) {
+  if (process.platform !== 'darwin' || cfg.notify === false) return;
+  const esc = (s) => String(s == null ? '' : s).replace(/[\\"]/g, '\\$&').replace(/\n/g, ' ');
+  const sound = cfg.notifySound ? ` sound name "${esc(cfg.notifySound)}"` : '';
+  try {
+    const c = spawn('osascript', ['-e', `display notification "${esc(message)}" with title "${esc(title)}"${sound}`], { stdio: 'ignore' });
+    c.on('error', () => {}); c.unref();
+  } catch { /* ignore */ }
+}
 
 // ---------- 每次 review 的完整 claude 输出, 存到本机 ----------
 const REVIEW_LOG_DIR = process.env.LARK_REVIEW_CLIENT_REVIEW_LOG_DIR || path.join(os.homedir(), '.lark-review-client-logs');
@@ -260,6 +271,7 @@ async function runReviewJob(job) {
   const prompt = renderPrompt(job, wt.worktreePath, ciStatus, conf.prompt);
   const model = job.review_model || cfg.reviewModel;
 
+  if (runningJob && runningJob.job_id === job.job_id) runningJob.stage = 'claude';
   send({ type: 'review_progress', job_id: job.job_id, stage: 'claude' });
   log(`running claude --print --model ${model} in ${wt.worktreePath}`);
   const r = await run(cfg.claudePath, [
@@ -282,14 +294,23 @@ async function runReviewJob(job) {
 // 一次只跑一单，避免本机多个 claude 抢资源。
 let busy = false;
 const queue = [];
+let runningJob = null;                 // 当前执行中的 job(供 /status 菜单栏 + 重连上下文)
+// 注: 重复派单的防护放在服务端(hub 掉线时保留在途 job + 派单去重), client 不做去重 ——
+// client 信息太少易误拦(如合法的"再来一轮")。client 只负责: 重连 + 把真实结果发回。
 async function pump() {
   if (busy || !queue.length) return;
   busy = true;
   const job = queue.shift();
+  runningJob = { repo: job.repo, pr_num: job.pr_num, job_id: job.job_id, branch: job.branch, stage: 'worktree', since: Date.now() };
+  notify(`⚡ 正在 Review PR #${job.pr_num}`, `${job.repo} · ${job.branch || ''} · 用你的账号在本机自动执行`);
   let result;
   try { result = await runReviewJob(job); }
   catch (e) { result = { exit_code: 1, log_tail: `客户端异常: ${e.message}`, verdict: '', general_comment_url: '', inline_count: '?', result_line: '' }; }
+  // 结果照常发回 hub —— 即使中途断线, 重连后这条也会被 hub 接受(hub 掉线时保留了该 job)。
   send({ type: 'review_result', job_id: job.job_id, ...result });
+  if (result.exit_code === 0 && result.verdict) notify(`✅ Review 完成 PR #${job.pr_num}`, `结论 ${result.verdict} · inline ${result.inline_count} · 已用你的账号提交`);
+  else notify(`❌ Review 未完成 PR #${job.pr_num}`, `exit=${result.exit_code} ${(result.log_tail || '').slice(0, 80)}`);
+  runningJob = null;
   busy = false;
   setImmediate(pump);
 }
@@ -299,6 +320,8 @@ let ws = null;
 let hbTimer = null;
 let reconnectDelay = 1000;
 let connected = false, registered = false;
+let everRegistered = false;   // 曾成功注册过 → 之后的断开算"重连", 用于通知/回 Lark
+let pendingReconnect = false; // 断开后置真, 下次 register_ack 时视为重连(发通知 + 通知 hub)
 let halted = false;   // 注册被拒(bad_token 等)时置真: 暂停自动重连, 但保活配置页供改 token
 let identity = { open_id: null, name: null, recommended_version: null };
 // 服务端受管 repo 清单 [{repo, prompt}], register_ack / repos_updated 下发。
@@ -332,7 +355,15 @@ function connect() {
       case 'register_ack': {
         registered = true;
         halted = false;
-        identity = { open_id: msg.open_id, name: msg.name, recommended_version: msg.recommended_version || null };
+        // 重连成功: 弹本机通知 + 通知 hub(由 hub 回一条 Lark "已重新连接"消息)。
+        if (pendingReconnect) {
+          pendingReconnect = false;
+          const midJob = busy && runningJob ? ` (PR #${runningJob.pr_num} 仍在本机继续)` : '';
+          notify('🔁 已重新连接 hub', (busy ? 'Review 仍在继续' : '待命中') + midJob);
+          send({ type: 'reconnected', was_busy: busy, repo: runningJob ? runningJob.repo : '', pr_num: runningJob ? runningJob.pr_num : '' });
+        }
+        everRegistered = true;
+        identity = { open_id: msg.open_id, name: msg.name, recommended_version: msg.recommended_version || null, upgrade: msg.upgrade || null };
         if (Array.isArray(msg.managed_repos)) managedRepos = msg.managed_repos;
         log(`registered as ${msg.name} (${msg.open_id}) ✓  本机 v${CLIENT_VERSION}，服务端推荐 v${msg.recommended_version || '?'}`);
         // 对照服务端清单提示配置缺口: 本地多配的(不会被派单)、本地一个没配的。
@@ -347,7 +378,9 @@ function connect() {
           logErr(`  当前 v${CLIENT_VERSION} → 推荐 v${msg.upgrade.recommended}` +
                  (msg.upgrade.below_min ? `（已低于最低要求 v${msg.upgrade.min}，可能不兼容）` : ''));
           if (msg.upgrade.message) logErr(`  升级方式：${msg.upgrade.message}`);
+          logErr(`  打开配置页一键更新: http://127.0.0.1:${cfg.configPort || 8790}/`);
           logErr('=============================================================');
+          notify(`🆙 有新版本 v${msg.upgrade.recommended}`, `当前 v${CLIENT_VERSION}，打开配置页点「一键更新」`);
         }
         break;
       }
@@ -374,11 +407,13 @@ function connect() {
         try { ws.close(); } catch { /* ignore */ }
         break;
       }
-      case 'review_job':
+      case 'review_job': {
         log(`got review_job ${msg.job_id} pr=#${msg.pr_num} repo=${msg.repo} branch=${msg.branch}${msg.provider === 'azdo' ? ' provider=azdo' : ''}`);
+        notify(`🟡 收到 Review PR #${msg.pr_num}`, `${msg.repo} · ${msg.branch || ''}`);
         queue.push(msg);
         pump();
         break;
+      }
       case 'pr_closed':
         if (cfg.repos[msg.repo]) {
           const c = cfg.repos[msg.repo];
@@ -396,6 +431,11 @@ function connect() {
     if (halted) {
       logErr(`已暂停自动重连(等待改 token)。配置页: http://127.0.0.1:${cfg.configPort || 8790}/`);
       return;
+    }
+    // 曾注册过才算"掉线重连"(首次连不上不弹)。置 pendingReconnect, 重连成功后回 Lark。
+    if (everRegistered && !pendingReconnect) {
+      pendingReconnect = true;
+      notify('⚠️ 与 hub 断开', '正在自动重连…' + (busy && runningJob ? ` (PR #${runningJob.pr_num} 仍在本机继续)` : ''));
     }
     logErr(`disconnected; reconnecting in ${reconnectDelay}ms`);
     setTimeout(connect, reconnectDelay);
@@ -491,6 +531,36 @@ function reloadAndReconnect() {
   }
 }
 
+// ---------- 客户端自更新(从 lark-review-client 仓库 git pull + 重启; 失败给手动步骤) ----------
+const CLIENT_DIR = __dirname;
+const UPDATE_REPO_URL = 'https://github.com/TommyZhao888/lark-review-client';
+function manualUpdateSteps() {
+  return [
+    `cd "${CLIENT_DIR}"`,
+    `git pull            # 若不是 git 克隆: 从 ${UPDATE_REPO_URL} 下载最新, 覆盖本目录文件`,
+    'npm install --omit=dev',
+    './run-client.sh restart    # 或重启客户端进程',
+  ];
+}
+async function selfUpdate() {
+  const chk = await run('git', ['-C', CLIENT_DIR, 'rev-parse', '--is-inside-work-tree']);
+  if (chk.code !== 0 || String(chk.stdout).trim() !== 'true') {
+    return { ok: false, manual: true, reason: 'not_git', detail: `客户端目录不是 git 仓库(${CLIENT_DIR})，无法自动更新。`, steps: manualUpdateSteps() };
+  }
+  const before = (await run('git', ['-C', CLIENT_DIR, 'rev-parse', 'HEAD'])).stdout.trim();
+  const pull = await run('git', ['-C', CLIENT_DIR, 'pull', '--ff-only']);
+  if (pull.code !== 0) {
+    return { ok: false, manual: true, reason: 'pull_failed', detail: (pull.stdout + pull.stderr).trim().slice(-600), steps: manualUpdateSteps() };
+  }
+  const after = (await run('git', ['-C', CLIENT_DIR, 'rev-parse', 'HEAD'])).stdout.trim();
+  if (before === after) return { ok: true, changed: false, message: '已是最新版本，无需更新。' };
+  log(`self-update: ${before.slice(0, 7)} → ${after.slice(0, 7)}，npm install + 重启`);
+  const npm = await run('npm', ['install', '--omit=dev'], { cwd: CLIENT_DIR });   // 依赖可能变; best-effort
+  notify('🆙 客户端已更新', `${before.slice(0, 7)} → ${after.slice(0, 7)}，正在重启…`);
+  setTimeout(doRestart, 800);   // 先把响应回给页面, 再重启
+  return { ok: true, changed: true, before: before.slice(0, 7), after: after.slice(0, 7), npm_ok: npm.code === 0, message: '更新成功，正在重启客户端(几秒后自动重连)…' };
+}
+
 function startConfigServer() {
   const port = cfg.configPort || 8790;
   const srv = http.createServer((req, res) => {
@@ -515,7 +585,11 @@ function startConfigServer() {
       return json(200, {
         client_version: CLIENT_VERSION, connected, registered,
         name: identity.name, open_id: identity.open_id, recommended_version: identity.recommended_version,
+        outdated: !!identity.upgrade, upgrade: identity.upgrade || null,   // 有新版本时供配置页显示更新提示/按钮
         managed_repo_count: managedRepos.length,   // 配置页据此感知清单何时到位, 自动补渲染
+        // 执行中/排队的 Review 任务(供菜单栏插件 lionreview 显示; 无防护/审计)。
+        running: runningJob ? [{ repo: runningJob.repo, pr_num: runningJob.pr_num, branch: runningJob.branch, stage: runningJob.stage, since: runningJob.since }] : [],
+        queued: queue.map((j) => ({ repo: j.repo, pr_num: j.pr_num })),
       });
     }
     if (req.method === 'POST' && u === '/config') {
@@ -556,6 +630,11 @@ function startConfigServer() {
     if (req.method === 'POST' && u === '/restart') {
       json(200, { ok: true });
       doRestart();
+      return;
+    }
+    if (req.method === 'POST' && u === '/self-update') {
+      selfUpdate().then((r) => json(200, r))
+        .catch((e) => json(200, { ok: false, manual: true, reason: 'error', detail: e.message, steps: manualUpdateSteps() }));
       return;
     }
     res.writeHead(404); res.end('not found');
