@@ -23,6 +23,8 @@
   button.sm { padding:4px 10px; font-size:12px; }
   .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:7px; }
   .dot.on { background:var(--ok); } .dot.off { background:#666; }
+  .pill { font-size:11px; padding:2px 7px; border-radius:20px; background:#22262f; color:var(--mut); white-space:nowrap; }
+  .pill.warn { background:#3a2418; color:#ffb454; }
   .idrow { display:flex; gap:10px 28px; flex-wrap:wrap; align-items:flex-start; }
   .idrow div span { color:var(--mut); font-size:12px; display:block; }
   #conn { display:inline-flex; align-items:center; white-space:nowrap; }
@@ -87,18 +89,16 @@
 
   <div class="card">
     <h2>项目(repos)</h2>
+    <div class="muted" style="margin-bottom:10px">从下拉列表选择要参与的项目(清单由管理员在服务端 hub「Repo 规则」配置并下发)。每个项目填<b>你本机</b>的路径;提示词按项目<b>在本机单独配置</b>,只影响你自己的 client,留空 = 服务端为该项目配的默认 &gt; 内置默认模板。支持占位符 <code>{{PR_NUM}}</code> <code>{{WORKTREE_PATH}}</code> <code>{{CI_STATUS}}</code>。</div>
+    <div style="display:flex; gap:8px; margin-bottom:10px">
+      <select id="repoSel" style="flex:1"></select>
+      <button class="sm acc" id="repoAddBtn" onclick="addSelectedRepo()">+ 添加</button>
+    </div>
     <div id="repos"></div>
-    <button class="sm" onclick="addRepo()">+ 添加项目</button>
-    <div class="muted" style="margin-top:8px">只有你配了的 repo,服务端才会把对应 PR 派给你。</div>
-  </div>
-
-  <div class="card">
-    <h2>Review 提示词(可选)</h2>
-    <div class="muted" style="margin-bottom:8px">留空 = 用内置默认模板。支持占位符 <code>{{PR_NUM}}</code> <code>{{WORKTREE_PATH}}</code> <code>{{CI_STATUS}}</code>(运行时自动替换)。</div>
-    <textarea id="promptOverride" rows="12" placeholder="(留空 = 使用默认模板)"></textarea>
-    <div style="margin-top:8px; display:flex; gap:8px">
-      <button class="sm" type="button" onclick="loadDefaultPrompt()">填入默认模板以编辑</button>
-      <button class="sm" type="button" onclick="document.getElementById('promptOverride').value=''">清空(改回默认)</button>
+    <div id="reposHint" class="muted" style="margin:8px 0"></div>
+    <div style="display:flex; gap:8px">
+      <button class="sm" onclick="reloadRepos()">↻ 刷新清单</button>
+      <button class="sm hide" id="manualAddBtn" onclick="addManualRepo()">+ 手动添加项目(旧服务端兼容)</button>
     </div>
   </div>
 
@@ -126,32 +126,116 @@
 <script>
 const $ = id => document.getElementById(id);
 function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
-function esc(s){ return String(s==null?'':s); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-function repoRow(name='', mainRepo='', worktreeBase=''){
-  const d = document.createElement('div'); d.className='repo';
-  d.innerHTML = `<button class="sm rm" onclick="this.parentNode.remove()">删除</button>
-    <label>owner/repo</label><input class="mono r-name" value="${esc(name)}" placeholder="Liontech-tw/lion-trip-app-global">
+// ---- 项目列表: 下拉选择服务端受管项目添加; 路径/提示词按项目在本机配置 ----
+let MANAGED = [];                       // 服务端受管清单 [{repo, prompt}]
+let reposDirty = false;                 // 用户动过项目区未保存时, 不自动覆盖渲染
+let lastManagedCount = -1;              // /status 的清单数量变化 → 自动补渲染(如刚连上服务端)
+function markReposDirty(){ reposDirty = true; }
+function isManaged(name){ return MANAGED.some(m=>m.repo===name); }
+function serverPromptOf(name){ const m=MANAGED.find(x=>x.repo===name); return m ? (m.prompt||'') : ''; }
+function providerOf(name){ const m=MANAGED.find(x=>x.repo===name); return (m&&m.provider==='azdo') ? 'azdo' : 'github'; }
+function builtinPromptOf(name){ return providerOf(name)==='azdo' ? (window.__defaultPromptAzdo||'') : (window.__defaultPrompt||''); }
+
+// 一个已添加的项目块: 本机路径 + 本机 per-repo 提示词(留空则走全局/服务端/内置)。
+function repoBlock(name, conf){
+  conf = conf || {};
+  const managed = isManaged(name);
+  const sp = serverPromptOf(name);
+  const d = document.createElement('div'); d.className='repo rblock'; d.dataset.repo=name;
+  d.innerHTML = `<button class="sm rm" type="button">删除</button>
+    <div style="margin-bottom:4px"><b class="mono">${esc(name)}</b> ${managed
+      ? (providerOf(name)==='azdo' ? '<span class="pill">服务端受管 · Azure DevOps</span>' : '<span class="pill">服务端受管 · GitHub</span>')
+      : '<span class="pill warn">⚠ 服务端未受管,不会被派单</span>'}</div>
     <div class="two">
-      <div><label>本机 clone 路径 mainRepo</label><input class="mono r-main" value="${esc(mainRepo)}" placeholder="/Users/you/Source/xxx"></div>
-      <div><label>worktree 目录 worktreeBase</label><input class="mono r-wt" value="${esc(worktreeBase)}" placeholder="/Users/you/Source/xxx-worktrees"></div>
+      <div><label>本机 clone 路径 mainRepo</label><input class="mono r-main" value="${esc(conf.mainRepo||'')}" placeholder="/Users/you/Source/xxx"></div>
+      <div><label>worktree 目录 worktreeBase</label><input class="mono r-wt" value="${esc(conf.worktreeBase||'')}" placeholder="留空 = mainRepo + &quot;-worktrees&quot;"></div>
+    </div>
+    <label>该项目的 review 提示词(仅本机生效,可选)</label>
+    <textarea class="r-prompt" rows="4" placeholder="留空 = 用${sp?'服务端为该项目配的默认提示词':'内置默认模板'}">${esc(conf.prompt||'')}</textarea>
+    <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+      ${sp?'<button class="sm fill-server" type="button">填入服务端默认以编辑</button>':''}
+      <button class="sm fill-builtin" type="button">填入内置默认以编辑</button>
+      <button class="sm clear-prompt" type="button">清空(用默认)</button>
     </div>`;
+  d.querySelector('.rm').addEventListener('click', ()=>{ d.remove(); markReposDirty(); refreshRepoSel(); });
+  const fsv = d.querySelector('.fill-server');
+  if (fsv) fsv.addEventListener('click', ()=>{ d.querySelector('.r-prompt').value = serverPromptOf(name); markReposDirty(); });
+  d.querySelector('.fill-builtin').addEventListener('click', ()=>{ d.querySelector('.r-prompt').value = builtinPromptOf(name); markReposDirty(); });
+  d.querySelector('.clear-prompt').addEventListener('click', ()=>{ d.querySelector('.r-prompt').value=''; markReposDirty(); });
+  d.querySelector('.r-main').addEventListener('change', e=>{     // 填了 clone 路径, worktree 目录空 → 按约定补全
+    const wt=d.querySelector('.r-wt'); if(e.target.value.trim() && !wt.value.trim()) wt.value=e.target.value.trim()+'-worktrees';
+  });
+  d.addEventListener('input', markReposDirty);
   $('repos').appendChild(d);
 }
-function addRepo(){ repoRow(); }
+// 旧服务端(不下发清单)兼容: 手动填 owner/repo 的空白行。
+function manualRow(name='', conf){
+  conf = conf || {};
+  const d = document.createElement('div'); d.className='repo xrepo';
+  d.innerHTML = `<button class="sm rm" onclick="this.parentNode.remove();markReposDirty()">删除</button>
+    <label>owner/repo</label><input class="mono r-name" value="${esc(name)}" placeholder="Liontech-tw/lion-trip-app-global">
+    <div class="two">
+      <div><label>本机 clone 路径 mainRepo</label><input class="mono r-main" value="${esc(conf.mainRepo||'')}" placeholder="/Users/you/Source/xxx"></div>
+      <div><label>worktree 目录 worktreeBase</label><input class="mono r-wt" value="${esc(conf.worktreeBase||'')}" placeholder="/Users/you/Source/xxx-worktrees"></div>
+    </div>
+    <label>该项目的 review 提示词(仅本机生效,可选)</label>
+    <textarea class="r-prompt" rows="4" placeholder="留空 = 用内置默认模板">${esc(conf.prompt||'')}</textarea>`;
+  d.addEventListener('input', markReposDirty);
+  $('repos').appendChild(d);
+}
+function addManualRepo(){ manualRow(); }
+
+// 下拉里只列"服务端受管且尚未添加"的项目。
+function refreshRepoSel(){
+  const added = new Set([...document.querySelectorAll('#repos .repo')].map(d=>d.dataset.repo).filter(Boolean));
+  const avail = MANAGED.filter(m=>!added.has(m.repo));
+  $('repoSel').innerHTML = avail.length
+    ? avail.map(m=>`<option value="${esc(m.repo)}">${esc(m.repo)}${m.provider==='azdo'?' [Azure DevOps]':''}${m.prompt?' (有服务端默认提示词)':''}</option>`).join('')
+    : `<option value="">${MANAGED.length?'(服务端清单里的项目已全部添加)':'(等待服务端下发项目清单…)'}</option>`;
+  $('repoAddBtn').disabled = !avail.length;
+}
+function addSelectedRepo(){
+  const v = $('repoSel').value; if(!v) return;
+  repoBlock(v, {});
+  refreshRepoSel(); markReposDirty();
+}
+
+function renderRepos(managed, localRepos, registered){
+  MANAGED = managed || [];
+  $('repos').innerHTML='';
+  Object.keys(localRepos||{}).forEach(k=>{
+    if (MANAGED.length) repoBlock(k, localRepos[k]);           // 有清单: 受管/未受管由块内标识
+    else manualRow(k, localRepos[k]);                          // 无清单(旧服务端): 旧式行
+  });
+  const noManaged = !MANAGED.length;
+  $('manualAddBtn').classList.toggle('hide', !noManaged);
+  $('reposHint').textContent = noManaged
+    ? (registered ? '服务端未下发项目清单(服务端版本较旧或未配 Repo 规则), 可手动添加。'
+                  : '尚未连接服务端 —— 先填好上方 serverUrl 和 token 并保存, 连上后下拉列表会自动列出可参与的项目。')
+    : '';
+  refreshRepoSel();
+  lastManagedCount = MANAGED.length;
+  reposDirty = false;
+}
+async function reloadRepos(){
+  try { const c = await fetch('/config').then(r=>r.json());
+    const s = await fetch('/status').then(r=>r.json());
+    renderRepos(c.managedRepos||[], c.repos||{}, !!s.registered);
+  } catch(e){}
+}
 
 async function load(){
   const c = await fetch('/config').then(r=>r.json());
   $('serverUrl').value=c.serverUrl||''; $('token').value=c.token||'';
   $('claudePath').value=c.claudePath||''; $('reviewModel').value=c.reviewModel||'';
   $('worktreeMaxAgeDays').value=c.worktreeMaxAgeDays||''; $('heartbeatMs').value=c.heartbeatMs||'';
-  $('promptOverride').value=c.promptOverride||''; window.__defaultPrompt=c.defaultPrompt||'';
-  $('repos').innerHTML='';
-  const repos=c.repos||{}; const ks=Object.keys(repos);
-  if(!ks.length) repoRow(); else ks.forEach(k=>repoRow(k, repos[k].mainRepo, repos[k].worktreeBase));
+  window.__defaultPrompt=c.defaultPrompt||'';           // 供各项目块「填入内置默认以编辑」(GitHub)
+  window.__defaultPromptAzdo=c.defaultPromptAzdo||'';   // 同上(Azure DevOps 项目)
+  renderRepos(c.managedRepos||[], c.repos||{}, false);
   refreshStatus();
 }
-function loadDefaultPrompt(){ $('promptOverride').value = window.__defaultPrompt || ''; }
 async function refreshStatus(){
   try { const s = await fetch('/status').then(r=>r.json());
     $('ver').textContent = 'client v'+(s.client_version||'?');
@@ -159,20 +243,27 @@ async function refreshStatus(){
       + (s.registered?' · 已注册':'');
     $('iName').textContent = s.name||'—'; $('iOid').textContent = s.open_id||'—';
     $('connHint').textContent = s.connected ? (s.recommended_version?('服务端推荐客户端 v'+s.recommended_version):'') : '连上服务端后会自动显示你的姓名/open_id。检查 serverUrl 与 token。';
+    // 服务端清单数量变化(刚连上/管理员改了 Repo 规则) → 未动过项目区时自动重渲染。
+    const mc = Number(s.managed_repo_count||0);
+    if (mc !== lastManagedCount && !reposDirty) reloadRepos();
   } catch(e){}
 }
 function collect(){
   const repos={};
   document.querySelectorAll('#repos .repo').forEach(d=>{
-    const n=d.querySelector('.r-name').value.trim();
+    const n = d.dataset.repo || (d.querySelector('.r-name') ? d.querySelector('.r-name').value.trim() : '');
     if(!n) return;
-    repos[n]={ mainRepo:d.querySelector('.r-main').value.trim(), worktreeBase:d.querySelector('.r-wt').value.trim() };
+    const main=d.querySelector('.r-main').value.trim();
+    let wt=d.querySelector('.r-wt').value.trim();
+    if(main && !wt) wt = main + '-worktrees';   // 按约定补全
+    repos[n]={ mainRepo:main, worktreeBase:wt };
+    const p=d.querySelector('.r-prompt') ? d.querySelector('.r-prompt').value : '';
+    if(p && p.trim()) repos[n].prompt = p;      // 该项目的本机提示词(留空不写)
   });
   return {
     serverUrl:$('serverUrl').value.trim(), token:$('token').value.trim(),
     claudePath:$('claudePath').value.trim()||'claude', reviewModel:$('reviewModel').value.trim()||'claude-opus-4-8',
     worktreeMaxAgeDays:Number($('worktreeMaxAgeDays').value)||14, heartbeatMs:Number($('heartbeatMs').value)||15000,
-    promptOverride:$('promptOverride').value,
     repos
   };
 }
@@ -180,10 +271,19 @@ async function save(){
   $('msg').textContent='';
   const cfg=collect();
   if(!cfg.serverUrl||!cfg.token){ $('msg').innerHTML='<span class="err">serverUrl 和 token 必填</span>'; return; }
-  if(!Object.keys(cfg.repos).length){ $('msg').innerHTML='<span class="err">至少配一个项目</span>'; return; }
+  for(const [n,rc] of Object.entries(cfg.repos)){
+    if(!rc.mainRepo||!rc.worktreeBase){ $('msg').innerHTML='<span class="err">项目 '+esc(n)+' 需填 mainRepo(worktreeBase 可留空自动补全)</span>'; return; }
+  }
   try {
     const r = await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());
-    if(r.ok){ toast('已保存,正在按新配置重连…'); $('msg').innerHTML='<span class="ok">已保存并热重载</span>'; setTimeout(refreshStatus,1500); }
+    if(r.ok){
+      reposDirty=false;
+      const none = !Object.keys(cfg.repos).length;
+      toast('已保存,正在按新配置重连…');
+      $('msg').innerHTML = none ? '<span class="ok">已保存并热重载</span> <span class="muted">(未启用任何项目, 暂不会接单; 连上后从清单勾选)</span>'
+                                : '<span class="ok">已保存并热重载</span>';
+      setTimeout(refreshStatus,1500); setTimeout(refreshStatus,3500);
+    }
     else $('msg').innerHTML='<span class="err">'+esc(r.error||'保存失败')+'</span>';
   } catch(e){ $('msg').innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
 }
