@@ -131,7 +131,10 @@ The worktree already exists at {{WORKTREE_PATH}}; skip Step 0 (worktree creation
 
 IMPORTANT: this is a one-shot headless run. The process terminates the moment you stop producing output, so NEVER suspend, schedule background monitors, or promise to continue later -- any such follow-up will never run.
 
-After completing, output a single final line in this exact format:
+CRITICAL RESULT CONTRACT — the run is ONLY counted as done if your very last output is the result line.
+Regardless of outcome (approve / changes / error), your FINAL output MUST be exactly ONE line, on its own
+line, plain text, with NOTHING after it — no summary, no markdown, no code fence, no closing remarks.
+Do NOT end with a prose summary; the result line must be the last thing you print:
 ___RESULT___ verdict=<APPROVE|COMMENT|REQUEST_CHANGES> general_comment_url=<url-or-NONE> inline_count=<integer>`;
 
 // Azure DevOps repo 的内置默认模板: 跑 /pr-review-azdo(需成员机器装好该 claude 命令,
@@ -148,7 +151,10 @@ The worktree already exists at {{WORKTREE_PATH}}; skip worktree creation and cle
 
 IMPORTANT: this is a one-shot headless run. The process terminates the moment you stop producing output, so NEVER suspend, schedule background monitors, or promise to continue later -- any such follow-up will never run.
 
-After completing, output a single final line in this exact format:
+CRITICAL RESULT CONTRACT — the run is ONLY counted as done if your very last output is the result line.
+Regardless of outcome (approve / changes / error), your FINAL output MUST be exactly ONE line, on its own
+line, plain text, with NOTHING after it — no summary, no markdown, no code fence, no closing remarks.
+Do NOT end with a prose summary; the result line must be the last thing you print:
 ___RESULT___ verdict=<APPROVE|COMMENT|REQUEST_CHANGES> general_comment_url=<url-or-NONE> inline_count=<integer>`;
 
 function renderPrompt(job, worktreePath, ciStatus, repoTmpl) {
@@ -245,7 +251,8 @@ async function pruneStaleWorktrees() {
 }
 
 // ---------- review job 执行 ----------
-const RESULT_RE = /___RESULT___ verdict=([A-Z_]+) general_comment_url=(\S+) inline_count=([0-9]+)/g;
+// 容错: 容忍 ___RESULT___ 后带 **/空白、字段间任意空白(claude 偶尔加粗或换行)。
+const RESULT_RE = /_{3}RESULT_{3}\**\s+verdict=\s*([A-Za-z_]+)\s+general_comment_url=\s*(\S+)\s+inline_count=\s*(\d+)/g;
 function parseResult(logText) {
   let last = null, m;
   while ((m = RESULT_RE.exec(logText)) !== null) last = m;
