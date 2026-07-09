@@ -101,6 +101,43 @@ struct PrClosed: Codable {
     var pr_num: Int
 }
 
+/// 宽容解码 Int：服务端（JS 无类型）对 pr_num 等字段可能发数字也可能发字符串
+/// （生产实测 review_job.pr_num 为 "593" 字符串），两种都必须接受。
+private func decodeLenientInt<K: CodingKey>(
+    _ c: KeyedDecodingContainer<K>, _ key: K
+) throws -> Int {
+    if let i = try? c.decode(Int.self, forKey: key) { return i }
+    if let s = try? c.decode(String.self, forKey: key), let i = Int(s) { return i }
+    throw DecodingError.typeMismatch(Int.self, DecodingError.Context(
+        codingPath: c.codingPath + [key],
+        debugDescription: "既不是数字也不是数字字符串"))
+}
+
+// 自定义 init(from:) 放 extension，保留 struct 的 memberwise init。
+extension ReviewJob {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        job_id = try c.decode(String.self, forKey: .job_id)
+        pr_num = try decodeLenientInt(c, CodingKeys.pr_num)
+        repo = try c.decode(String.self, forKey: .repo)
+        branch = try c.decodeIfPresent(String.self, forKey: .branch)
+        provider = try c.decodeIfPresent(String.self, forKey: .provider)
+        pr_url = try c.decodeIfPresent(String.self, forKey: .pr_url)
+        ci_overall = try c.decodeIfPresent(String.self, forKey: .ci_overall)
+        ci_failed_names = try c.decodeIfPresent(String.self, forKey: .ci_failed_names)
+        review_model = try c.decodeIfPresent(String.self, forKey: .review_model)
+        prompt_template = try c.decodeIfPresent(String.self, forKey: .prompt_template)
+    }
+}
+
+extension PrClosed {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        repo = try c.decode(String.self, forKey: .repo)
+        pr_num = try decodeLenientInt(c, CodingKeys.pr_num)
+    }
+}
+
 enum InboundMessage {
     case registerAck(RegisterAck)
     case reposUpdated(ReposUpdated)
@@ -108,18 +145,30 @@ enum InboundMessage {
     case reviewJob(ReviewJob)
     case prClosed(PrClosed)
 
-    /// 解析入站帧。JSON 非法 / type 未知 / 二次 decode 失败都返回 nil（对齐 Node：静默丢弃）。
+    /// 解析入站帧。JSON 非法 / type 未知返回 nil（对齐 Node：静默丢弃）。
+    /// 已知类型但载荷解码失败也返回 nil，但会调用 onDecodeFailure——
+    /// 完全静默会掩盖协议不兼容（如服务端 pr_num 发字符串），必须留痕。
+    nonisolated(unsafe) static var onDecodeFailure: ((_ type: String, _ error: Error) -> Void)?
+
     static func parse(_ text: String) -> InboundMessage? {
         guard let data = text.data(using: .utf8) else { return nil }
         struct Envelope: Codable { var type: String? }
         let dec = JSONDecoder()
         guard let env = try? dec.decode(Envelope.self, from: data), let type = env.type else { return nil }
+
+        func decode<T: Codable>(_ t: T.Type, _ wrap: (T) -> InboundMessage) -> InboundMessage? {
+            do { return wrap(try dec.decode(t, from: data)) }
+            catch {
+                onDecodeFailure?(type, error)
+                return nil
+            }
+        }
         switch type {
-        case "register_ack":    return (try? dec.decode(RegisterAck.self, from: data)).map { .registerAck($0) }
-        case "repos_updated":   return (try? dec.decode(ReposUpdated.self, from: data)).map { .reposUpdated($0) }
-        case "register_reject": return (try? dec.decode(RegisterReject.self, from: data)).map { .registerReject($0) }
-        case "review_job":      return (try? dec.decode(ReviewJob.self, from: data)).map { .reviewJob($0) }
-        case "pr_closed":       return (try? dec.decode(PrClosed.self, from: data)).map { .prClosed($0) }
+        case "register_ack":    return decode(RegisterAck.self) { .registerAck($0) }
+        case "repos_updated":   return decode(ReposUpdated.self) { .reposUpdated($0) }
+        case "register_reject": return decode(RegisterReject.self) { .registerReject($0) }
+        case "review_job":      return decode(ReviewJob.self) { .reviewJob($0) }
+        case "pr_closed":       return decode(PrClosed.self) { .prClosed($0) }
         default:                return nil
         }
     }

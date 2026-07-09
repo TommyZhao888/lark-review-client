@@ -27,6 +27,9 @@ final class AppRuntime {
         LogStore.shared.onLine = { line in
             Task { @MainActor in AppRuntime.shared.state.appendLog(line) }
         }
+        InboundMessage.onDecodeFailure = { type, error in
+            LogStore.shared.log("⚠️ 消息 \(type) 解码失败(已丢弃): \(error)")
+        }
         notifications.currentConfig = { [state] in state.config }
         notifications.requestAuthorization()
 

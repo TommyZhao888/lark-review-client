@@ -109,6 +109,39 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(job.ci_failed_names, "unit-test")
     }
 
+    func testParseReviewJobWithStringPrNum() {
+        // 生产实测报文：服务端（JS）把 pr_num 发成字符串 "593"，必须能解析
+        let text = """
+        {"type":"review_job","job_id":"job_mrdc23n6_2","repo":"Liontech-tw/lion-trip-app-global",\
+        "pr_num":"593","branch":"fix/home-cache-searchbg-contenttabs",\
+        "ci_overall":"PENDING (still running)","ci_failed_names":"","review_model":"claude-opus-4-8",\
+        "prompt_template":"","provider":"github",\
+        "pr_url":"https://github.com/Liontech-tw/lion-trip-app-global/pull/593"}
+        """
+        guard case let .reviewJob(job)? = InboundMessage.parse(text) else {
+            return XCTFail("字符串 pr_num 的 review_job 必须能解析")
+        }
+        XCTAssertEqual(job.pr_num, 593)
+        XCTAssertEqual(job.repo, "Liontech-tw/lion-trip-app-global")
+        XCTAssertEqual(job.provider, "github")
+    }
+
+    func testParsePrClosedWithStringPrNum() {
+        guard case let .prClosed(pc)? = InboundMessage.parse(#"{"type":"pr_closed","repo":"a/b","pr_num":"42"}"#) else {
+            return XCTFail("字符串 pr_num 的 pr_closed 必须能解析")
+        }
+        XCTAssertEqual(pc.pr_num, 42)
+    }
+
+    func testKnownTypeDecodeFailureIsReported() {
+        var reported: String?
+        InboundMessage.onDecodeFailure = { type, _ in reported = type }
+        defer { InboundMessage.onDecodeFailure = nil }
+        // pr_num 完全非法（非数字字符串）→ 解析失败但要留痕
+        XCTAssertNil(InboundMessage.parse(#"{"type":"review_job","job_id":"j","repo":"a/b","pr_num":"abc"}"#))
+        XCTAssertEqual(reported, "review_job")
+    }
+
     func testParseUnknownAndGarbage() {
         XCTAssertNil(InboundMessage.parse(#"{"type":"future_thing","x":1}"#), "未知类型静默丢弃")
         XCTAssertNil(InboundMessage.parse("not json"), "非法 JSON 静默丢弃")
