@@ -12,7 +12,20 @@
 | 协议/行为 | —— | 与 Node 版**逐字段对等**，配置/日志路径复用，可随时来回切 |
 | 安装 | `npm install` + `run-client.sh`（见下文）| 本机**编译** `.app`（见下）|
 
-> 同一时间只跑一个。下面「编译 Mac App」是 macOS 用户的推荐路径；不想编译就用 Node 版。
+> 同一时间只跑一个。macOS 用户**最省事**是下载现成 App（下节）；想跟源码/用菜单栏自更新就 clone 后编译；不想碰 Mac App 就用 Node 版。
+
+## 下载安装 Mac App（免编译，推荐大多数人）
+
+每次发版由 GitHub Actions 自动编译并发到 **[Releases](https://github.com/TommyZhao888/lark-review-client/releases)**：
+
+1. 在 Releases 下载最新的 `LarkReviewClient-vX.Y.Z.dmg`。
+2. 双击挂载 → 把 **LarkReviewClient** 拖进 **Applications**。
+3. **首次打开**（仅一次）：在「应用程序」里**右键 App → 打开**（ad-hoc 签名未公证，Gatekeeper 会拦一次）；
+   或先跑 `xattr -dr com.apple.quarantine /Applications/LarkReviewClient.app` 再双击。
+4. 菜单栏点 🦁 → 设置… → 填 `serverUrl` 和管理员发的 `token` → 在「项目」tab 从服务端清单添加 repo 并填本机路径。
+
+> 下载安装的版本**不带源码式自更新**（它不是 git 仓库）；有新版本时按同样步骤下载新 dmg 覆盖即可。
+> 想要菜单栏「更新并重启」一键自更新，用下面的 **clone + 编译** 方式安装。
 
 ## 编译 Mac App（macapp）
 

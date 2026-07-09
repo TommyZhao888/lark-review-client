@@ -1,0 +1,53 @@
+name: Release Mac App (DMG)
+
+# 打 vX.Y.Z tag 时自动在 macOS runner 上编译 mac app、打成 .dmg 并发到 GitHub Release,
+# 成员免装 Xcode / 免编译直接下载。也可手动为已存在的 tag 补建 Release。
+# 公开仓库的 GitHub Actions(含 macOS runner)免费不限量。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已存在的 tag(如 v1.4.0), 为它补建/更新 DMG Release'
+        required: true
+
+permissions:
+  contents: write   # 创建 Release / 上传附件需要
+
+jobs:
+  build-dmg:
+    runs-on: macos-14   # Apple Silicon runner
+    steps:
+      - name: 确定 tag
+        id: tag
+        run: echo "name=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}   # 检出该 tag 对应代码
+
+      - name: 编译 + 打 DMG
+        run: make -C macapp dmg
+
+      - name: 带版本号重命名
+        run: mv macapp/build/LarkReviewClient.dmg "LarkReviewClient-${{ steps.tag.outputs.name }}.dmg"
+
+      - name: 发 Release + 上传 DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          NOTES="LarkReviewClient $TAG — 原生 Mac App(免编译)。
+
+          安装: 下载 .dmg → 双击挂载 → 把 App 拖进 Applications。
+          首次打开(仅一次): 右键 App → 打开(ad-hoc 签名未公证); 或先跑
+          \`xattr -dr com.apple.quarantine /Applications/LarkReviewClient.app\`。
+          用 git clone 装的成员可继续用菜单栏「更新并重启」自更新。"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "LarkReviewClient-$TAG.dmg" --clobber
+          else
+            gh release create "$TAG" "LarkReviewClient-$TAG.dmg" \
+              --title "LarkReviewClient $TAG" --notes "$NOTES"
+          fi
