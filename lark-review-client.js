@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.4.3';
+const CLIENT_VERSION = '1.4.4';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -381,13 +381,20 @@ function connect() {
           log(`尚未配置任何项目 —— 打开配置页 http://127.0.0.1:${cfg.configPort} 从服务端清单里选择并填本机路径`);
         }
         if (msg.upgrade) {
-          logErr('======================== 请升级客户端 ========================');
-          logErr(`  当前 v${CLIENT_VERSION} → 推荐 v${msg.upgrade.recommended}` +
-                 (msg.upgrade.below_min ? `（已低于最低要求 v${msg.upgrade.min}，可能不兼容）` : ''));
+          const hard = !!msg.upgrade.below_min;   // 低于最低版本 = 硬拦(服务端已暂停派单); 否则软提示
+          logErr('======================== 客户端版本提示 ========================');
+          if (hard) {
+            logErr(`  ⛔ 版本过低: 当前 v${CLIENT_VERSION} 低于最低要求 v${msg.upgrade.min}`);
+            logErr('     服务端已【暂停给你派 review】, 升级后自动恢复。');
+          } else {
+            logErr(`  🆙 建议升级: 当前 v${CLIENT_VERSION} → 推荐 v${msg.upgrade.recommended}(当前仍可正常接单)`);
+          }
           if (msg.upgrade.message) logErr(`  升级方式：${msg.upgrade.message}`);
           logErr(`  打开配置页一键更新: http://127.0.0.1:${cfg.configPort || 8790}/`);
           logErr('=============================================================');
-          notify(`🆙 有新版本 v${msg.upgrade.recommended}`, `当前 v${CLIENT_VERSION}，打开配置页点「一键更新」`);
+          notify(hard ? '⛔ 版本过低，已暂停派单' : `🆙 有新版本 v${msg.upgrade.recommended}`,
+                 hard ? `当前 v${CLIENT_VERSION} 低于最低 v${msg.upgrade.min}，请一键更新`
+                      : `当前 v${CLIENT_VERSION}，建议更新(仍可接单)`);
         }
         break;
       }

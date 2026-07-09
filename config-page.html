@@ -263,9 +263,11 @@ async function refreshStatus(){
     if (!updBusy) {
       const b=$('uBanner'), btn=$('uBtn'), st=$('uState');
       if (s.outdated && s.upgrade) {
-        st.textContent = '· 有新版本'; st.className='err';
-        b.innerHTML = `🆙 有新版本 <b>v${esc(s.upgrade.recommended)}</b>(当前 v${esc(s.client_version)})，建议更新。`
-          + (s.upgrade.below_min?` <span class="err">已低于最低要求 v${esc(s.upgrade.min)}，可能不兼容</span>`:'')
+        const hard = !!s.upgrade.below_min;   // 低于最低版本 = 硬拦(已暂停派单); 否则软提示
+        st.textContent = hard ? '· 版本过低(已暂停派单)' : '· 有新版本'; st.className='err';
+        b.innerHTML = (hard
+            ? `⛔ 版本过低: 当前 v${esc(s.client_version)} 低于最低要求 <b>v${esc(s.upgrade.min)}</b> —— 服务端已<b>暂停给你派 review</b>, 升级后恢复。`
+            : `🆙 有新版本 <b>v${esc(s.upgrade.recommended)}</b>(当前 v${esc(s.client_version)})，建议更新(当前仍可接单)。`)
           + (s.upgrade.message?`<br><span class="muted">${esc(s.upgrade.message)}</span>`:'');
         btn.style.display='';
       } else {

@@ -165,8 +165,13 @@ final class AppRuntime {
                 LogStore.shared.log("尚未配置任何项目 —— 打开设置从服务端清单里选择并填本机路径")
             }
             if let up = ack.upgrade {
-                LogStore.shared.log("请升级客户端: 当前 v\(CLIENT_VERSION) → 推荐 v\(up.recommended ?? "?")\(up.below_min == true ? "（已低于最低要求 v\(up.min ?? "?")，可能不兼容）" : "")\(up.message.map { " 升级方式: \($0)" } ?? "")")
-                notifications.notify("🆙 有新版本 v\(up.recommended ?? "?")", "当前 v\(CLIENT_VERSION)，请更新客户端")
+                if up.below_min == true {
+                    LogStore.shared.log("⛔ 版本过低: 当前 v\(CLIENT_VERSION) 低于最低要求 v\(up.min ?? "?") —— 服务端已暂停给你派 review, 升级后自动恢复。\(up.message.map { " 升级方式: \($0)" } ?? "")")
+                    notifications.notify("⛔ 版本过低，已暂停派单", "当前 v\(CLIENT_VERSION) 低于最低 v\(up.min ?? "?")，请尽快升级")
+                } else {
+                    LogStore.shared.log("🆙 建议升级: 当前 v\(CLIENT_VERSION) → 推荐 v\(up.recommended ?? "?")(当前仍可正常接单)。\(up.message.map { " 升级方式: \($0)" } ?? "")")
+                    notifications.notify("🆙 有新版本 v\(up.recommended ?? "?")", "当前 v\(CLIENT_VERSION)，建议升级(仍可接单)")
+                }
                 // 「空闲时自动更新」开启 + 当前空闲 → 自动更新。每个 recommended 版本只自动尝试一次(防失败重连死循环)。
                 let rec = up.recommended ?? "?"
                 let idle = state.runningJob == nil && state.queuedJobs.isEmpty

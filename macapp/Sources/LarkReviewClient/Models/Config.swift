@@ -1,7 +1,7 @@
 import Foundation
 
 /// 客户端版本：升级功能时手动 +1（与 Info.plist 保持一致）。服务端据此判断是否提示升级。
-let CLIENT_VERSION = "1.4.3"
+let CLIENT_VERSION = "1.4.4"
 
 /// 单个 repo 的本机配置（~/.lark-review-client.json 的 repos["owner/repo"]）。
 struct RepoConfig: Codable, Equatable {

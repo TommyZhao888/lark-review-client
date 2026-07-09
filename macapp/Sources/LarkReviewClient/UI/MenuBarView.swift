@@ -62,12 +62,18 @@ struct MenuBarView: View {
 
     private func upgradeBanner(_ up: UpgradeInfo) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("🆙 有新版本 v\(up.recommended ?? "?")（当前 v\(CLIENT_VERSION)）")
-                .font(.callout.bold())
             if up.below_min == true {
-                Text("已低于最低要求 v\(up.min ?? "?")，可能不兼容")
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                // 硬拦: 低于最低版本 → 服务端已暂停派单, 必须升级。
+                Text("⛔ 版本过低 v\(CLIENT_VERSION) < 最低 v\(up.min ?? "?")")
+                    .font(.callout.bold()).foregroundStyle(.red)
+                Text("服务端已暂停给你派 review，升级后自动恢复")
+                    .font(.caption).foregroundStyle(.red)
+            } else {
+                // 软提示: 低于推荐但 ≥最低 → 仍可正常接单, 建议升级。
+                Text("🆙 有新版本 v\(up.recommended ?? "?")（当前 v\(CLIENT_VERSION)）")
+                    .font(.callout.bold())
+                Text("建议升级；当前仍可正常接单")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             if let msg = up.message, !msg.isEmpty {
                 Text(msg)
