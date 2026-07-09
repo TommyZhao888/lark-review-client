@@ -95,6 +95,7 @@ final class AppRuntime {
 
     private func wireWebSocket() {
         ws.onStateChange = { [state] s in state.connection = s }
+        ws.onFrame = { [state] outbound, text in state.appendWSMessage(outbound: outbound, text: text) }
 
         ws.onRegisterAck = { [state, ws, notifications] ack, wasReconnect in
             state.identity = AppState.Identity(

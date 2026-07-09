@@ -17,6 +17,8 @@ final class WebSocketClient: NSObject {
     var onPrClosed: ((PrClosed) -> Void)?
     var onStateChange: ((AppState.ConnectionState) -> Void)?
     var onDisconnected: ((_ everRegistered: Bool) -> Void)?
+    /// 每个收/发的原始文本帧（outbound = client→server），供 WS 消息日志。
+    var onFrame: ((_ outbound: Bool, _ text: String) -> Void)?
 
     private var session: URLSession!
     private var task: URLSessionWebSocketTask?
@@ -84,6 +86,7 @@ final class WebSocketClient: NSObject {
     func send(_ msg: OutboundMessage) {
         guard let task, connected else { return }
         guard let text = try? msg.encodedString() else { return }
+        onFrame?(true, text)
         let myEpoch = epoch
         task.send(.string(text)) { [weak self] error in
             guard error != nil else { return }
@@ -119,6 +122,7 @@ final class WebSocketClient: NSObject {
                     let msg = try await t.receive()
                     guard let self, self.epoch == myEpoch else { return }
                     if case let .string(text) = msg {
+                        self.onFrame?(false, text)
                         self.handleMessage(text)
                     }
                 } catch {
