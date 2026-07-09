@@ -1,0 +1,5 @@
+# Swift 构建产物
+.build/
+build/
+*.xcodeproj
+.swiftpm/
