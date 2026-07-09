@@ -96,7 +96,8 @@ function handleCommand(line) {
       send({
         type: 'review_job',
         job_id: `mock-job-${++jobSeq}`,
-        pr_num: Number(pr || 1),
+        // 生产 hub（JS）实测把 pr_num 发成字符串，mock 保持一致以免掩盖类型兼容问题
+        pr_num: String(pr || 1),
         repo: repo || 'mock/alpha',
         branch: branch || 'main',
         ...(cmd === 'azdo' ? { provider: 'azdo', pr_url: `https://dev.azure.com/x/pr/${pr || 1}` } : { pr_url: `https://github.com/${repo}/pull/${pr || 1}` }),

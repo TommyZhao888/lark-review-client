@@ -38,6 +38,17 @@ final class AppState {
     /// 运行日志内存镜像（供 LogsView 实时显示）。
     var recentLogLines: [String] = []
 
+    /// WebSocket 消息帧日志（收/发原文，供 LogsView「WS 消息」tab 排查协议问题）。
+    struct WSLogEntry: Identifiable, Equatable {
+        let id: Int
+        let date: Date
+        let outbound: Bool     // true = client→server
+        let text: String
+        var isHeartbeat: Bool { text.contains("\"type\":\"heartbeat\"") }
+    }
+    var wsMessages: [WSLogEntry] = []
+    private var wsSeq = 0
+
     var isRegistered: Bool { connection == .registered }
 
     /// 菜单栏标题：🦁⚡N 在跑 / 🦁🟢 在线待命 / 🦁🔴 离线，末尾 🆙 有新版本。
@@ -63,6 +74,18 @@ final class AppState {
         case .registered: return "在线待命"
         case .halted(let reason): return "注册被拒（\(reason)），请更换 token"
         }
+    }
+
+    func appendWSMessage(outbound: Bool, text: String) {
+        wsSeq += 1
+        wsMessages.append(WSLogEntry(id: wsSeq, date: Date(), outbound: outbound, text: text))
+        if wsMessages.count > 500 {
+            wsMessages.removeFirst(wsMessages.count - 500)
+        }
+    }
+
+    func clearWSMessages() {
+        wsMessages.removeAll()
     }
 
     func appendLog(_ line: String) {
