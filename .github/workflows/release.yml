@@ -28,11 +28,18 @@ jobs:
         with:
           ref: ${{ steps.tag.outputs.name }}   # 检出该 tag 对应代码
 
+      # 用 make bundle(自古就有) + 内联 hdiutil, 不依赖 make dmg 目标 ——
+      # 这样连早于"dmg 目标"的旧 tag(如 v1.4.0)也能出包, 无需移动 tag。
       - name: 编译 + 打 DMG
-        run: make -C macapp dmg
-
-      - name: 带版本号重命名
-        run: mv macapp/build/LarkReviewClient.dmg "LarkReviewClient-${{ steps.tag.outputs.name }}.dmg"
+        run: |
+          set -euo pipefail
+          make -C macapp bundle
+          STAGE="$(mktemp -d)"
+          cp -R macapp/build/LarkReviewClient.app "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "LarkReviewClient" -srcfolder "$STAGE" \
+            -ov -format UDZO "LarkReviewClient-${{ steps.tag.outputs.name }}.dmg"
+          ls -lh "LarkReviewClient-${{ steps.tag.outputs.name }}.dmg"
 
       - name: 发 Release + 上传 DMG
         env:
