@@ -4,6 +4,39 @@
 
 谁在 Lark 里对 PR 卡片打 SLAP 表情 / 点「再来一轮」，服务端就把这次 review 派给**他本人**的客户端执行：在你本机建 git worktree、跑 `claude /pr-review`、把 inline / general comment 提交到 GitHub（用你自己的 Claude 账号），结论回传给服务端由机器人发回 Lark 线程。
 
+## 两种客户端形态（二选一）
+
+| | Node 版（本 README 主要内容）| 原生 Mac App（`macapp/`，推荐 macOS 用户）|
+|---|---|---|
+| 形态 | 后台 Node 进程 + 浏览器配置页 + SwiftBar 插件 三件套 | 一个纯菜单栏常驻 app（SwiftUI）|
+| 协议/行为 | —— | 与 Node 版**逐字段对等**，配置/日志路径复用，可随时来回切 |
+| 安装 | `npm install` + `run-client.sh`（见下文）| 本机**编译** `.app`（见下）|
+
+> 同一时间只跑一个。下面「编译 Mac App」是 macOS 用户的推荐路径；不想编译就用 Node 版。
+
+## 编译 Mac App（macapp）
+
+**要求**：macOS 14+、Xcode 命令行工具（`xcode-select --install`，swift 5.9+）。
+
+```bash
+git clone https://github.com/TommyZhao888/lark-review-client.git
+cd lark-review-client/macapp
+
+make test      # 单元测试（协议编解码 / 配置读写 / 模板渲染）
+make bundle    # 编译并组装 build/LarkReviewClient.app（swift build -c release + ad-hoc 签名）
+make run       # bundle 后启动（= open build/LarkReviewClient.app）
+```
+
+- `make build` 只编译不打包；`make clean` 清理。
+- 首次启动：菜单栏点 🦁 → 设置… → 填 `serverUrl`（`wss://…`）和管理员发的 `token` → 保存并应用
+  → 连上后在「项目」tab 从服务端清单添加 repo 并填本机路径。
+- 升级：`git pull` 后重新 `make bundle` 覆盖 `build/LarkReviewClient.app`（app 内不做自更新）。
+- 更完整的说明（迁移、本地端到端测试、代码结构）见 **`macapp/README.md`**。
+
+---
+
+以下是 **Node 版** 的安装与使用。
+
 ## 前置要求
 
 本机已安装并登录好（与原单机版一致）：
