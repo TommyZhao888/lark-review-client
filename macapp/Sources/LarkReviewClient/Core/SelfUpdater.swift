@@ -5,6 +5,16 @@ import AppKit
 /// 由菜单栏「更新并重启」按钮(一键)或配置「空闲时自动更新」触发。全程用 ProcessRunner 跑 git/make。
 enum SelfUpdater {
 
+    /// 下载安装(dmg)版的升级引导页(GitHub Releases)。
+    static let releasesURL = URL(string: "https://github.com/TommyZhao888/lark-review-client/releases/latest")!
+
+    /// 是否"源码(git clone)安装"——只有这种才能源码式自更新(git pull + make bundle)。
+    /// dmg/下载安装没有 git 仓库, 应引导去 Releases 下新包, 而不是尝试本地编译。
+    static func isGitInstall() -> Bool {
+        guard let root = repoRoot() else { return false }
+        return FileManager.default.fileExists(atPath: root + "/.git")
+    }
+
     /// 定位仓库根目录：app bundle 在 <root>/macapp/build/LarkReviewClient.app，
     /// 故向上找到含 `macapp/Makefile` 的目录即根。开发(swift run)下也尽量兜住。
     static func repoRoot() -> String? {

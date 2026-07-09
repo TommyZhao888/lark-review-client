@@ -5,6 +5,7 @@ struct MenuBarView: View {
     @Environment(AppState.self) private var state
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openURL) private var openURL
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -73,21 +74,30 @@ struct MenuBarView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            let busy = state.runningJob != nil || !state.queuedJobs.isEmpty
-            switch state.updatePhase {
-            case .running(let step):
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(step).font(.caption)
+            if SelfUpdater.isGitInstall() {
+                // 源码(git clone)安装 → 一键源码自更新(git pull + make bundle + 重启)。
+                let busy = state.runningJob != nil || !state.queuedJobs.isEmpty
+                switch state.updatePhase {
+                case .running(let step):
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(step).font(.caption)
+                    }
+                case .failed(let reason):
+                    Text("更新失败：\(reason)").font(.caption).foregroundStyle(.red)
+                    updateButton("重试更新并重启", disabled: busy)
+                case .idle:
+                    updateButton("更新并重启", disabled: busy)
+                    if busy {
+                        Text("有 review 在跑/排队，跑完再更新").font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
-            case .failed(let reason):
-                Text("更新失败：\(reason)").font(.caption).foregroundStyle(.red)
-                updateButton("重试更新并重启", disabled: busy)
-            case .idle:
-                updateButton("更新并重启", disabled: busy)
-                if busy {
-                    Text("有 review 在跑/排队，跑完再更新").font(.caption2).foregroundStyle(.secondary)
-                }
+            } else {
+                // 下载(dmg)安装 → 没有 git 仓库, 无法本地编译; 引导去 Releases 下新 dmg 覆盖。
+                Button("前往下载新版") { openURL(SelfUpdater.releasesURL) }
+                Text("你是下载安装的版本，请到 Releases 下载新的 .dmg 覆盖安装。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(8)

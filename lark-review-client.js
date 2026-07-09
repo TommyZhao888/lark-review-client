@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.4.0';
+const CLIENT_VERSION = '1.4.1';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]

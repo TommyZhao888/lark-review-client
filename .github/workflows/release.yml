@@ -18,11 +18,20 @@ permissions:
 
 jobs:
   build-dmg:
-    runs-on: macos-14   # Apple Silicon runner
+    runs-on: macos-15   # Apple Silicon runner, 默认 Xcode 较新
     steps:
       - name: 确定 tag
         id: tag
         run: echo "name=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      # runner 默认 Xcode 版本可能偏旧, 对 SwiftUI @MainActor 推断过严导致误报编译错。
+      # 选用镜像里最新的 Xcode(与本地验证过的工具链一致)。
+      - name: 选用最新 Xcode
+        run: |
+          latest="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest/Contents/Developer"; fi
+          xcodebuild -version || true
+          swift --version
 
       - uses: actions/checkout@v4
         with:

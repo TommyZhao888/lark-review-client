@@ -170,7 +170,8 @@ final class AppRuntime {
                 // 「空闲时自动更新」开启 + 当前空闲 → 自动更新。每个 recommended 版本只自动尝试一次(防失败重连死循环)。
                 let rec = up.recommended ?? "?"
                 let idle = state.runningJob == nil && state.queuedJobs.isEmpty
-                if state.config.autoUpdate, idle, self.autoUpdateTriedFor != rec {
+                // 自动更新仅对源码(git)安装生效: dmg 安装无法本地编译, 靠菜单栏「前往下载新版」引导。
+                if state.config.autoUpdate, idle, self.autoUpdateTriedFor != rec, SelfUpdater.isGitInstall() {
                     self.autoUpdateTriedFor = rec
                     LogStore.shared.log("自动更新: 检测到新版本 v\(rec) 且空闲，开始自动更新")
                     self.performSelfUpdate(auto: true)
