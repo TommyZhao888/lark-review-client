@@ -10,12 +10,16 @@ Node 版 `lark-review-client.js` 的原生 mac 重写：把「后台 Node 进程
 | 状态展示 | SwiftBar 插件 lionreview.5s.sh | 菜单栏图标（🦁⚡N / 🦁🟢 / 🦁🔴，🆙 有新版本） |
 | 日志查看 | 配置页日志 tab | 菜单栏 → 日志…（运行日志 + Review 日志） |
 | 开机自启 | launchd plist | 设置 → 开机自启（SMAppService 登录项） |
-| 一键自更新 | git pull + 重启 | 暂不提供（服务端 upgrade 提示仍展示，更新手动 `make bundle` 替换） |
+| 一键自更新 | git pull + 重启 | **菜单栏「更新并重启」**（git pull + `make bundle` 重编译 + 重启）；设置里可开「空闲时自动更新」 |
 | 配置文件 | `~/.lark-review-client.json` | 同一个文件，未知键保留 |
 | 运行日志 | `~/.lark-review-client.log` | 同一个文件 |
 | Review 日志 | `~/.lark-review-client-logs/` | 同一个目录 |
 
-客户端版本号 `1.3.0`（与 Node 版一致；`Models/Config.swift` 的 `CLIENT_VERSION` + `Resources/Info.plist`，两处同步改）。
+客户端版本号 `1.4.0`（与 Node 版一致；`Models/Config.swift` 的 `CLIENT_VERSION` + `Resources/Info.plist`，两处同步改；发版记得在仓库打 `vX.Y.Z` tag——服务端按最新 tag 判断是否提示升级）。
+
+## 更新（自更新）
+
+菜单栏检测到新版本会显示 🆙，下拉里点 **「更新并重启」** 即可：本地 `git pull --ff-only` + `make bundle` 重新编译 + 重启 app（有 review 在跑/排队时按钮禁用，跑完再更）。设置 → 更新里可开 **「空闲时自动更新」**（默认关）：连上服务端且空闲时检测到新版本自动执行上述流程。编译失败/非 git 目录会在横幅提示原因并回退到手动 `make bundle`。
 
 ## 构建与运行
 

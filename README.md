@@ -30,7 +30,8 @@ make run       # bundle 后启动（= open build/LarkReviewClient.app）
 - `make build` 只编译不打包；`make clean` 清理。
 - 首次启动：菜单栏点 🦁 → 设置… → 填 `serverUrl`（`wss://…`）和管理员发的 `token` → 保存并应用
   → 连上后在「项目」tab 从服务端清单添加 repo 并填本机路径。
-- 升级：`git pull` 后重新 `make bundle` 覆盖 `build/LarkReviewClient.app`（app 内不做自更新）。
+- 升级：有新版本时菜单栏显示 🆙，下拉点 **「更新并重启」** 自动 `git pull` + `make bundle` + 重启；
+  或在设置里开「空闲时自动更新」。也可手动 `git pull` + `make bundle` 覆盖 `build/LarkReviewClient.app`。
 - 更完整的说明（迁移、本地端到端测试、代码结构）见 **`macapp/README.md`**。
 
 ---

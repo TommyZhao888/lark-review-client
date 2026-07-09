@@ -60,7 +60,7 @@ struct MenuBarView: View {
     }
 
     private func upgradeBanner(_ up: UpgradeInfo) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 6) {
             Text("🆙 有新版本 v\(up.recommended ?? "?")（当前 v\(CLIENT_VERSION)）")
                 .font(.callout.bold())
             if up.below_min == true {
@@ -73,10 +73,31 @@ struct MenuBarView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            let busy = state.runningJob != nil || !state.queuedJobs.isEmpty
+            switch state.updatePhase {
+            case .running(let step):
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(step).font(.caption)
+                }
+            case .failed(let reason):
+                Text("更新失败：\(reason)").font(.caption).foregroundStyle(.red)
+                updateButton("重试更新并重启", disabled: busy)
+            case .idle:
+                updateButton("更新并重启", disabled: busy)
+                if busy {
+                    Text("有 review 在跑/排队，跑完再更新").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.yellow.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func updateButton(_ title: String, disabled: Bool) -> some View {
+        Button(title) { AppRuntime.shared.performSelfUpdate(auto: false) }
+            .disabled(disabled)
     }
 
     @ViewBuilder

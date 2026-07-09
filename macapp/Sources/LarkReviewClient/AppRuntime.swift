@@ -14,6 +14,8 @@ final class AppRuntime {
 
     private var pruneTask: Task<Void, Never>?
     private var started = false
+    /// 已对该 recommended 版本自动尝试过更新，防失败后每次重连都重试（一次没成功就等用户手动/换轮）。
+    private var autoUpdateTriedFor: String?
 
     private init() {}
 
@@ -94,13 +96,46 @@ final class AppRuntime {
         ws.reconnect(with: state.config)
     }
 
+    /// 自更新：git pull + make bundle + 重启。auto=true 为「空闲时自动更新」触发（不打断在跑/排队的 review）。
+    func performSelfUpdate(auto: Bool) {
+        if case .running = state.updatePhase { return }              // 已在更新中
+        if state.runningJob != nil || !state.queuedJobs.isEmpty {
+            if auto { return }                                       // 自动模式：有活在跑就不更新，等空闲
+            state.updatePhase = .failed("有 review 在跑或排队，等它跑完再更新")
+            return
+        }
+        state.updatePhase = .running("准备…")
+        LogStore.shared.log("self-update: 开始更新\(auto ? "（自动，检测到新版本且空闲）" : "（手动）")")
+        Task { [weak self] in
+            let outcome = await SelfUpdater.run(onStep: { step in
+                Task { @MainActor in self?.state.updatePhase = .running(step) }
+            })
+            await MainActor.run {
+                guard let self else { return }
+                if outcome.ok {
+                    LogStore.shared.log("self-update: \(outcome.message)")
+                    if outcome.changed {
+                        self.state.updatePhase = .running("重启中…")   // relaunch 已触发，进程即将退出
+                    } else {
+                        self.state.updatePhase = .idle
+                        self.notifications.notify("客户端已是最新", outcome.message)
+                    }
+                } else {
+                    self.state.updatePhase = .failed(outcome.message)
+                    LogStore.shared.log("self-update 失败: \(outcome.message)")
+                    self.notifications.notify("⚠️ 自动更新失败", outcome.message)
+                }
+            }
+        }
+    }
+
     // ---------- 接线 ----------
 
     private func wireWebSocket() {
         ws.onStateChange = { [state] s in state.connection = s }
         ws.onFrame = { [state] outbound, text in state.appendWSMessage(outbound: outbound, text: text) }
 
-        ws.onRegisterAck = { [state, ws, notifications] ack, wasReconnect in
+        ws.onRegisterAck = { [self, state, ws, notifications] ack, wasReconnect in
             state.identity = AppState.Identity(
                 openId: ack.open_id ?? "",
                 name: ack.name ?? "",
@@ -132,6 +167,14 @@ final class AppRuntime {
             if let up = ack.upgrade {
                 LogStore.shared.log("请升级客户端: 当前 v\(CLIENT_VERSION) → 推荐 v\(up.recommended ?? "?")\(up.below_min == true ? "（已低于最低要求 v\(up.min ?? "?")，可能不兼容）" : "")\(up.message.map { " 升级方式: \($0)" } ?? "")")
                 notifications.notify("🆙 有新版本 v\(up.recommended ?? "?")", "当前 v\(CLIENT_VERSION)，请更新客户端")
+                // 「空闲时自动更新」开启 + 当前空闲 → 自动更新。每个 recommended 版本只自动尝试一次(防失败重连死循环)。
+                let rec = up.recommended ?? "?"
+                let idle = state.runningJob == nil && state.queuedJobs.isEmpty
+                if state.config.autoUpdate, idle, self.autoUpdateTriedFor != rec {
+                    self.autoUpdateTriedFor = rec
+                    LogStore.shared.log("自动更新: 检测到新版本 v\(rec) 且空闲，开始自动更新")
+                    self.performSelfUpdate(auto: true)
+                }
             }
         }
 

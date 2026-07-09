@@ -28,9 +28,17 @@ final class AppState {
         var since: Date
     }
 
+    /// 自更新阶段（UI 展示 + 防重复触发）。
+    enum UpdatePhase: Equatable {
+        case idle
+        case running(String)   // 进行中，附当前步骤文案（拉取/编译…）
+        case failed(String)    // 失败，附原因
+    }
+
     var connection: ConnectionState = .disconnected
     var identity: Identity?                 // 服务端下发，只读展示，绝不本地持久化
     var upgrade: UpgradeInfo?
+    var updatePhase: UpdatePhase = .idle
     var managedRepos: [ManagedRepo] = []
     var runningJob: RunningJob?
     var queuedJobs: [(repo: String, prNum: Int)] = []

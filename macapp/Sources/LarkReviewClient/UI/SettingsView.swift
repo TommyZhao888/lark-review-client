@@ -79,6 +79,13 @@ struct SettingsView: View {
             Section("开机自启") {
                 LoginItemToggle()
             }
+            Section("更新") {
+                Toggle("空闲时自动更新", isOn: $draft.autoUpdate)
+                Text("连上服务端、且当前无 review 在跑/排队时，检测到新版本自动 git pull + 重新编译 + 重启。关闭则仅提示，手动在菜单栏点「更新并重启」。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                LabeledContent("客户端版本", value: "v\(CLIENT_VERSION)")
+            }
         }
         .formStyle(.grouped)
     }

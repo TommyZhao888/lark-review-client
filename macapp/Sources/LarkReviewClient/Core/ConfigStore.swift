@@ -29,6 +29,7 @@ enum ConfigStore {
         if let d = obj["worktreeMaxAgeDays"] as? Int, d > 0 { cfg.worktreeMaxAgeDays = d }
         if let n = obj["notify"] as? Bool { cfg.notify = n }
         if let s = obj["notifySound"] as? String { cfg.notifySound = s }
+        if let a = obj["autoUpdate"] as? Bool { cfg.autoUpdate = a }
         if let repos = obj["repos"] as? [String: Any] {
             for (name, v) in repos {
                 guard let rc = v as? [String: Any] else { continue }
@@ -62,6 +63,7 @@ enum ConfigStore {
         cur["worktreeMaxAgeDays"] = cfg.worktreeMaxAgeDays > 0 ? cfg.worktreeMaxAgeDays : 14
         cur["heartbeatMs"] = cfg.heartbeatMs > 0 ? cfg.heartbeatMs : 15000
         cur["notify"] = cfg.notify
+        cur["autoUpdate"] = cfg.autoUpdate
         if cfg.notifySound.isEmpty { cur.removeValue(forKey: "notifySound") }
         else { cur["notifySound"] = cfg.notifySound }
 
