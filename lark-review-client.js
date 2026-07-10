@@ -149,7 +149,8 @@ function parseResetToEpoch(text, kind) {
 let usageQuota = null;            // { five_hour_pct, five_hour_reset_at, seven_day_pct, seven_day_reset_at }
 let usageQuotaAt = 0;            // 上次成功查询时刻(ms)
 const USAGE_POLL_MS = 600000;    // 每 10 分钟查一次(派活前还会再查一次拿最新值)
-const USAGE_FRESH_MS = 900000;   // 结果 15 分钟内视为新鲜(> 轮询间隔); 连续失败变旧 → 上报无百分比(hub 显示 —)
+const USAGE_FRESH_MS = 1500000;  // 结果 25 分钟内视为新鲜(必须 > 轮询间隔, 且能容忍一次失败轮询), 否则值会在
+                                 // 两次刷新之间被判过期 → hub 闪断显示 —。宁可短时展示稍旧值也一直显示到下次刷新。
 
 // 把 /usage 的 "Jul 10 at 3pm" 这类文案(本机时区, 与 /usage 显示时区一致)解析成 epoch ms。
 function parseUsageReset(s) {
@@ -183,7 +184,9 @@ function pollUsage() {
   return new Promise((resolve) => {
     let done = false, stdout = '', child, to;
     const finish = () => { if (done) return; done = true; clearTimeout(to); resolve(); };
-    try { child = spawn(cfg.claudePath, ['-p', '/usage', '--output-format', 'json'], { stdio: ['ignore', 'pipe', 'ignore'] }); }
+    // --dangerously-skip-permissions: 跳过 claude 沙盒/权限初始化, 避免它经 sandboxd 探测 Apple Music/
+    // 媒体库等 → 免得给成员弹"访问媒体库"授权(那是 claude 行为被归因到本 app, 与 review 无关)。/usage 只读本地, 无副作用。
+    try { child = spawn(cfg.claudePath, ['-p', '/usage', '--output-format', 'json', '--dangerously-skip-permissions'], { stdio: ['ignore', 'pipe', 'ignore'] }); }
     catch (e) { logErr(`查额度(/usage)启动失败: ${e.message}`); return resolve(); }
     to = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} finish(); }, 25000);
     if (child.stdout) child.stdout.on('data', (d) => { stdout += d; });

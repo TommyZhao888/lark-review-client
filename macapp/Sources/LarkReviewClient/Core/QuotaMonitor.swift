@@ -39,7 +39,8 @@ final class QuotaMonitor {
     private var usageSevenDayPct: Int?
     private var usageSevenDayResetMs: Int?
     private var usageAt: Date = .distantPast
-    private let usageFreshSec: TimeInterval = 360   // 6min 内视为新鲜; 否则拿不到 → 上报无百分比
+    private let usageFreshSec: TimeInterval = 1500  // 25min 内视为新鲜(必须 > 轮询间隔 10min, 且容忍一次失败轮询);
+                                                    // 否则值会在两次刷新之间被判过期 → hub 闪断显示 —。宁可短时展示稍旧值也持续显示到下次刷新。
 
     /// 每次 review 跑完喂入其输出, 命中限额则记下重置时间。
     func noteReviewOutput(_ logText: String) {
@@ -123,7 +124,9 @@ final class QuotaMonitor {
 
     /// 跑 `claude -p /usage --output-format json`, 解析 session(5小时)/week 百分比+重置时间, 更新缓存。
     func refreshUsage(config: Config) async {
-        let r = await ProcessRunner.run(config.claudePath, ["-p", "/usage", "--output-format", "json"])
+        // --dangerously-skip-permissions: 跳过 claude 沙盒/权限初始化, 避免经 sandboxd 探测 Apple Music/媒体库
+        // → 免得给成员弹"访问媒体库"授权(claude 行为被归因到本 app, 与 review 无关)。/usage 只读本地无副作用。
+        let r = await ProcessRunner.run(config.claudePath, ["-p", "/usage", "--output-format", "json", "--dangerously-skip-permissions"])
         guard r.code == 0 else { LogStore.shared.log("查额度(/usage)退出码 \(r.code)"); return }
         var text = r.stdout
         if let data = r.stdout.data(using: .utf8),
