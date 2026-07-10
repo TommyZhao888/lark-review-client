@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.5.3';
+const CLIENT_VERSION = '1.5.4';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -156,10 +156,11 @@ function readSnapshotQuota() {
   const pct = (w) => (w && typeof w.used_percentage === 'number') ? w.used_percentage : null;
   const resetMs = (w) => { const v = w && w.resets_at; if (v == null) return null; const n = typeof v === 'number' ? (v > 1e12 ? v : v * 1000) : Date.parse(v); return Number.isFinite(n) ? n : null; };
   const f5 = pct(snap.five_hour), d7 = pct(snap.seven_day);
-  // five_hour_pct 始终带出(供 hub/管理页显示"5小时已用%"), 与 ok 与否无关。
-  if (f5 != null && f5 >= cfg.quotaFiveHourThreshold) return { ok: false, reason: `five_hour_${f5}pct`, reset_at: resetMs(snap.five_hour), five_hour_pct: f5 };
-  if (d7 != null && d7 >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${d7}pct`, reset_at: resetMs(snap.seven_day), five_hour_pct: f5 };
-  return { ok: true, five_hour_pct: f5 };
+  const f5reset = resetMs(snap.five_hour);   // 5 小时窗恢复时间(ms), 始终带出供派活参考
+  // five_hour_pct / five_hour_reset_at 始终带出(供 hub/管理页显示"5小时已用%"+"恢复时间"), 与 ok 与否无关。
+  if (f5 != null && f5 >= cfg.quotaFiveHourThreshold) return { ok: false, reason: `five_hour_${f5}pct`, reset_at: f5reset, five_hour_pct: f5, five_hour_reset_at: f5reset };
+  if (d7 != null && d7 >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${d7}pct`, reset_at: resetMs(snap.seven_day), five_hour_pct: f5, five_hour_reset_at: f5reset };
+  return { ok: true, five_hour_pct: f5, five_hour_reset_at: f5reset };
 }
 
 // 汇总当前额度状态给服务端: 反应式优先(未过期), 否则看快照。默认 ok(未知不拦, 交给反应式兜底)。
@@ -167,12 +168,13 @@ function readSnapshotQuota() {
 function currentQuota() {
   const snap = readSnapshotQuota();
   const f5 = (snap && typeof snap.five_hour_pct === 'number') ? snap.five_hour_pct : null;
+  const f5r = (snap && typeof snap.five_hour_reset_at === 'number') ? snap.five_hour_reset_at : null;
   if (reactiveQuotaBlock) {
     if (reactiveQuotaBlock.reset_at && Date.now() >= reactiveQuotaBlock.reset_at) reactiveQuotaBlock = null;
-    else return { ok: false, reason: reactiveQuotaBlock.reason, reset_at: reactiveQuotaBlock.reset_at || null, five_hour_pct: f5 };
+    else return { ok: false, reason: reactiveQuotaBlock.reason, reset_at: reactiveQuotaBlock.reset_at || null, five_hour_pct: f5, five_hour_reset_at: f5r };
   }
-  if (snap && snap.ok === false) return { ok: false, reason: snap.reason, reset_at: snap.reset_at || null, five_hour_pct: f5 };
-  return { ok: true, reason: null, reset_at: null, five_hour_pct: f5 };
+  if (snap && snap.ok === false) return { ok: false, reason: snap.reason, reset_at: snap.reset_at || null, five_hour_pct: f5, five_hour_reset_at: f5r };
+  return { ok: true, reason: null, reset_at: null, five_hour_pct: f5, five_hour_reset_at: f5r };
 }
 
 // 自动把额度快照脚本配成 Claude Code 的 statusLine, 免逐台手动设置。
@@ -194,12 +196,14 @@ function ensureStatuslineInstalled() {
     let settings = {};
     try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch { settings = {}; }
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
+    const snapAbs = String(cfg.quotaSnapshotPath || '').replace(/^~/, os.homedir());
     const existing = settings.statusLine;
     if (existing && existing.command) {
-      if (!String(existing.command).includes('statusline-quota.sh')) {
-        log('检测到你已配置 Claude statusLine, 不覆盖。如需 hub 显示 5 小时额度百分比, 可改用 ~/.lark-review-client/statusline-quota.sh, 或把它的快照写入合并进你的 statusline(或设 autoStatusline:false 静默本提示)。');
-      }
-      return;   // 已是我们的 → 幂等无操作; 是别人的 → 尊重不动
+      const cmd = String(existing.command);
+      if (cmd.includes('statusline-quota.sh')) return;                       // 已是我们的 → 幂等
+      if (/claude-hud/i.test(cmd) && snapAbs) { bridgeClaudeHud(snapAbs); return; }  // claude-hud → 桥接让它写快照(不动 statusLine)
+      log('检测到你已配置 Claude statusLine(非 claude-hud), 不覆盖。如需 hub 显示 5 小时额度百分比, 把额度快照写入合并进你的 statusline, 或设 autoStatusline:false 静默本提示。');
+      return;   // 未知的第三方 statusline → 尊重不动
     }
     settings.statusLine = { type: 'command', command: `bash '${dest}'` };
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
@@ -208,6 +212,31 @@ function ensureStatuslineInstalled() {
     fs.renameSync(tmp, settingsPath);
     log(`已自动配置 Claude statusLine 写额度快照 → ${settingsPath}; 你交互使用 Claude 时会刷新 5 小时额度, hub 即可显示百分比`);
   } catch (e) { logErr(`自动配置 statusLine 失败(不影响 review): ${e.message}`); }
+}
+
+// 你的 statusLine 是 claude-hud 时的桥接: 让 claude-hud 把官方 rate_limits 快照写到我们读的路径
+// (claude-hud 自带 display.externalUsageWritePath, 格式与我们一致), 从而不改你的 statusLine 也能拿到额度。
+// 仅当 claude-hud 未配过该项(或已指向我们的路径)才设; 已指向别处则不覆盖。路径须绝对 .json。
+function bridgeClaudeHud(snapAbs) {
+  try {
+    if (!snapAbs || !snapAbs.startsWith('/') || !snapAbs.endsWith('.json')) {
+      log(`claude-hud 桥接跳过: 额度快照路径需为绝对 .json 路径(当前 ${snapAbs || '空'})`); return;
+    }
+    const cfgPath = path.join(os.homedir(), '.claude', 'plugins', 'claude-hud', 'config.json');
+    let hud = {};
+    try { hud = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch { hud = {}; }
+    if (!hud || typeof hud !== 'object' || Array.isArray(hud)) hud = {};
+    if (!hud.display || typeof hud.display !== 'object' || Array.isArray(hud.display)) hud.display = {};
+    const cur = hud.display.externalUsageWritePath;
+    if (cur === snapAbs) return;                                   // 已桥接, 幂等
+    if (cur) { log(`claude-hud 已配置 externalUsageWritePath=${cur}(非本工具路径), 不覆盖; 如需 hub 显示额度, 把 quotaSnapshotPath 指到该路径。`); return; }
+    hud.display.externalUsageWritePath = snapAbs;
+    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+    const tmp = cfgPath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(hud, null, 2) + '\n');
+    fs.renameSync(tmp, cfgPath);
+    log(`检测到 claude-hud statusLine, 已让它把额度快照写到 ${snapAbs}(你的 statusLine 未改动; 下次交互刷新即生效, hub 显示 5 小时百分比)`);
+  } catch (e) { logErr(`桥接 claude-hud 失败(不影响 review): ${e.message}`); }
 }
 
 // ---------- Mac 通知栏提醒(收到/执行中/完成/断连/重连); 非 macOS 或 cfg.notify=false 时跳过 ----------

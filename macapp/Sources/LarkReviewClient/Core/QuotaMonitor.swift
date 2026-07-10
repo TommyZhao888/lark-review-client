@@ -5,7 +5,8 @@ struct QuotaStatus: Equatable {
     var ok: Bool = true
     var reason: String? = nil
     var resetAtMs: Int? = nil
-    var fiveHourPct: Int? = nil   // 5 小时窗已用%(仅有新鲜快照时非空), 供管理页显示
+    var fiveHourPct: Int? = nil        // 5 小时窗已用%(仅有新鲜快照时非空), 供管理页显示
+    var fiveHourResetAtMs: Int? = nil  // 5 小时窗恢复时间(ms), 始终带出供派活参考
 
     /// 出站 JSON 字典(nil 字段省略键, 服务端按缺失=null 处理)。
     var jsonObject: [String: Any] {
@@ -13,6 +14,7 @@ struct QuotaStatus: Equatable {
         if let reason { o["reason"] = reason }
         if let resetAtMs { o["reset_at"] = resetAtMs }
         if let fiveHourPct { o["five_hour_pct"] = fiveHourPct }
+        if let fiveHourResetAtMs { o["five_hour_reset_at"] = fiveHourResetAtMs }
         return o
     }
 }
@@ -44,12 +46,13 @@ final class QuotaMonitor {
     func current(config: Config) -> QuotaStatus {
         let snap = readSnapshotQuota(config: config)
         let f5 = snap?.fiveHourPct
+        let f5r = snap?.fiveHourResetAtMs
         if let b = reactiveBlock {
             if Date() >= b.resetAt { reactiveBlock = nil }
-            else { return QuotaStatus(ok: false, reason: b.reason, resetAtMs: ms(b.resetAt), fiveHourPct: f5) }
+            else { return QuotaStatus(ok: false, reason: b.reason, resetAtMs: ms(b.resetAt), fiveHourPct: f5, fiveHourResetAtMs: f5r) }
         }
         if let s = snap, s.ok == false { return s }
-        return QuotaStatus(ok: true, fiveHourPct: f5)
+        return QuotaStatus(ok: true, fiveHourPct: f5, fiveHourResetAtMs: f5r)
     }
 
     // MARK: - 反应式解析
@@ -125,14 +128,15 @@ final class QuotaMonitor {
             if let s = v as? String, let d = isoDate(s) { return Int(d.timeIntervalSince1970 * 1000) }
             return nil
         }
-        let f5pct = pct(obj["five_hour"])   // 始终带出(与 ok 无关), 供管理页显示 5 小时已用%
+        let f5pct = pct(obj["five_hour"])          // 始终带出(与 ok 无关), 供管理页显示 5 小时已用%
+        let f5reset = resetMs(obj["five_hour"])    // 5 小时窗恢复时间, 始终带出供派活参考
         if let f5 = f5pct, f5 >= config.quotaFiveHourThreshold {
-            return QuotaStatus(ok: false, reason: "five_hour_\(f5)pct", resetAtMs: resetMs(obj["five_hour"]), fiveHourPct: f5)
+            return QuotaStatus(ok: false, reason: "five_hour_\(f5)pct", resetAtMs: f5reset, fiveHourPct: f5, fiveHourResetAtMs: f5reset)
         }
         if let d7 = pct(obj["seven_day"]), d7 >= config.quotaSevenDayThreshold {
-            return QuotaStatus(ok: false, reason: "seven_day_\(d7)pct", resetAtMs: resetMs(obj["seven_day"]), fiveHourPct: f5pct)
+            return QuotaStatus(ok: false, reason: "seven_day_\(d7)pct", resetAtMs: resetMs(obj["seven_day"]), fiveHourPct: f5pct, fiveHourResetAtMs: f5reset)
         }
-        return QuotaStatus(ok: true, fiveHourPct: f5pct)
+        return QuotaStatus(ok: true, fiveHourPct: f5pct, fiveHourResetAtMs: f5reset)
     }
 
     // MARK: - helpers
