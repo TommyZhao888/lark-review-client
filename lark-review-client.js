@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.5.1';
+const CLIENT_VERSION = '1.5.2';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -153,20 +153,23 @@ function readSnapshotQuota() {
   const pct = (w) => (w && typeof w.used_percentage === 'number') ? w.used_percentage : null;
   const resetMs = (w) => { const v = w && w.resets_at; if (v == null) return null; const n = typeof v === 'number' ? (v > 1e12 ? v : v * 1000) : Date.parse(v); return Number.isFinite(n) ? n : null; };
   const f5 = pct(snap.five_hour), d7 = pct(snap.seven_day);
-  if (f5 != null && f5 >= cfg.quotaFiveHourThreshold) return { ok: false, reason: `five_hour_${f5}pct`, reset_at: resetMs(snap.five_hour) };
-  if (d7 != null && d7 >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${d7}pct`, reset_at: resetMs(snap.seven_day) };
-  return { ok: true };
+  // five_hour_pct 始终带出(供 hub/管理页显示"5小时已用%"), 与 ok 与否无关。
+  if (f5 != null && f5 >= cfg.quotaFiveHourThreshold) return { ok: false, reason: `five_hour_${f5}pct`, reset_at: resetMs(snap.five_hour), five_hour_pct: f5 };
+  if (d7 != null && d7 >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${d7}pct`, reset_at: resetMs(snap.seven_day), five_hour_pct: f5 };
+  return { ok: true, five_hour_pct: f5 };
 }
 
 // 汇总当前额度状态给服务端: 反应式优先(未过期), 否则看快照。默认 ok(未知不拦, 交给反应式兜底)。
+// five_hour_pct 尽量带上(仅当有新鲜快照时非空), 供管理页显示 5 小时已用百分比。
 function currentQuota() {
+  const snap = readSnapshotQuota();
+  const f5 = (snap && typeof snap.five_hour_pct === 'number') ? snap.five_hour_pct : null;
   if (reactiveQuotaBlock) {
     if (reactiveQuotaBlock.reset_at && Date.now() >= reactiveQuotaBlock.reset_at) reactiveQuotaBlock = null;
-    else return { ok: false, reason: reactiveQuotaBlock.reason, reset_at: reactiveQuotaBlock.reset_at || null };
+    else return { ok: false, reason: reactiveQuotaBlock.reason, reset_at: reactiveQuotaBlock.reset_at || null, five_hour_pct: f5 };
   }
-  const snap = readSnapshotQuota();
-  if (snap && snap.ok === false) return { ok: false, reason: snap.reason, reset_at: snap.reset_at || null };
-  return { ok: true, reason: null, reset_at: null };
+  if (snap && snap.ok === false) return { ok: false, reason: snap.reason, reset_at: snap.reset_at || null, five_hour_pct: f5 };
+  return { ok: true, reason: null, reset_at: null, five_hour_pct: f5 };
 }
 
 // ---------- Mac 通知栏提醒(收到/执行中/完成/断连/重连); 非 macOS 或 cfg.notify=false 时跳过 ----------
