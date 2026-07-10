@@ -9,7 +9,8 @@ import Foundation
 
 enum OutboundMessage {
     case register(token: String, hostname: String, repos: [String], version: String, quota: QuotaStatus)
-    case heartbeat(quota: QuotaStatus)
+    case heartbeat                                       // 精简: 只保活, 额度改走独立 .quota 消息
+    case quota(quota: QuotaStatus)                       // Claude 额度独立上报(register_ack 后 + 每次 /usage 刷新后)
     case reviewProgress(jobId: String, stage: String)   // stage: "worktree" | "claude"
     case reviewResult(jobId: String, result: ReviewResult)
     case reconnected(wasBusy: Bool, repo: String, prNum: Int?)   // prNum 无任务时发 ""
@@ -19,8 +20,10 @@ enum OutboundMessage {
         case let .register(token, hostname, repos, version, quota):
             return ["type": "register", "token": token, "hostname": hostname,
                     "repos": repos, "version": version, "quota": quota.jsonObject]
-        case let .heartbeat(quota):
-            return ["type": "heartbeat", "quota": quota.jsonObject]
+        case .heartbeat:
+            return ["type": "heartbeat"]
+        case let .quota(quota):
+            return ["type": "quota", "quota": quota.jsonObject]
         case let .reviewProgress(jobId, stage):
             return ["type": "review_progress", "job_id": jobId, "stage": stage]
         case let .reviewResult(jobId, r):

@@ -123,18 +123,22 @@ final class QuotaMonitor {
     // MARK: - `claude -p /usage` 查额度(headless, 零 token, 自带重置时间)
 
     /// 跑 `claude -p /usage --output-format json`, 解析 session(5小时)/week 百分比+重置时间, 更新缓存。
-    func refreshUsage(config: Config) async {
+    /// 返回是否刷新出新鲜额度(供上层决定要不要独立上报一次 .quota; 与 Node 版"仅解析成功才 send"对齐)。
+    @discardableResult
+    func refreshUsage(config: Config) async -> Bool {
         // --dangerously-skip-permissions: 跳过 claude 沙盒/权限初始化, 避免经 sandboxd 探测 Apple Music/媒体库
         // → 免得给成员弹"访问媒体库"授权(claude 行为被归因到本 app, 与 review 无关)。/usage 只读本地无副作用。
         let r = await ProcessRunner.run(config.claudePath, ["-p", "/usage", "--output-format", "json", "--dangerously-skip-permissions"])
-        guard r.code == 0 else { LogStore.shared.log("查额度(/usage)退出码 \(r.code)"); return }
+        guard r.code == 0 else { LogStore.shared.log("查额度(/usage)退出码 \(r.code)"); return false }
         var text = r.stdout
         if let data = r.stdout.data(using: .utf8),
            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
            let res = obj["result"] as? String { text = res }
-        if !parseUsageText(text) {
+        let ok = parseUsageText(text)
+        if !ok {
             LogStore.shared.log("查额度(/usage): 未解析出 session/week 百分比(claude 版本过旧?)")
         }
+        return ok
     }
 
     /// 解析 /usage 文本: "Current session: N% used · resets ..."(5小时窗)/ "Current week (all models): M% used · resets ..."。

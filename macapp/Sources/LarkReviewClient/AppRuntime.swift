@@ -56,9 +56,11 @@ final class AppRuntime {
         }
 
         // Claude 额度查询: 立即一次 + 每 10min(headless `claude -p /usage`, 零 token; 派活前还会再查一次)。
-        usageTask = Task { @MainActor [state] in
+        // 刷新出新鲜额度就独立上报一次 .quota(不再挂心跳; 与 Node 版一致)。
+        usageTask = Task { @MainActor [state, ws] in
             while !Task.isCancelled {
-                await QuotaMonitor.shared.refreshUsage(config: state.config)
+                let ok = await QuotaMonitor.shared.refreshUsage(config: state.config)
+                if ok { ws.send(.quota(quota: QuotaMonitor.shared.current(config: state.config))) }
                 try? await Task.sleep(for: .seconds(600))
             }
         }

@@ -1,6 +1,6 @@
 {
   "name": "lark-review-client",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "private": true,
   "description": "Run PR reviews on your own machine with your own Claude, driven by the team Lark bot",
   "main": "lark-review-client.js",

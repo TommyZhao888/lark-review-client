@@ -167,7 +167,7 @@ final class WebSocketClient: NSObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(interval))
                 guard let self, self.epoch == myEpoch, !Task.isCancelled else { return }
-                self.send(.heartbeat(quota: QuotaMonitor.shared.current(config: self.config)))
+                self.send(.heartbeat)   // 只保活; 额度改走独立 .quota 消息
             }
         }
     }
@@ -204,6 +204,7 @@ final class WebSocketClient: NSObject {
             everRegistered = true
             onStateChange?(.registered)
             LogStore.shared.log("registered as \(ack.name ?? "?") (\(ack.open_id ?? "?")) ✓  本机 v\(CLIENT_VERSION)，服务端推荐 v\(ack.recommended_version ?? "?")")
+            send(.quota(quota: QuotaMonitor.shared.current(config: config)))   // 注册后立即上报一次额度(心跳不再带)
             onRegisterAck?(ack, wasReconnect)
 
         case .reposUpdated(let upd):

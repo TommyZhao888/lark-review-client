@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.6.0';
+const CLIENT_VERSION = '1.6.1';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -195,7 +195,7 @@ function pollUsage() {
       let text = stdout;
       try { const j = JSON.parse(stdout); if (j && typeof j.result === 'string') text = j.result; } catch { /* 非 json 按纯文本 */ }
       const parsed = parseUsageText(text);
-      if (parsed) { usageQuota = parsed; usageQuotaAt = Date.now(); }
+      if (parsed) { usageQuota = parsed; usageQuotaAt = Date.now(); sendQuota(); }   // 刷新后独立上报(不挂心跳)
       else logErr('查额度(/usage): 未解析出 session/week 百分比(claude 版本过旧?)');
       finish();
     });
@@ -522,6 +522,10 @@ let managedRepos = [];
 
 function send(obj) { try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch {} }
 
+// Claude 额度独立上报(与心跳解耦): 心跳 ~15s 高频, 额度 10min 才刷一次, 不必每心跳重复带。
+// 在 register_ack 后 + 每次 /usage 刷新后调用; ws 未连时 send() 自动 no-op。
+function sendQuota() { send({ type: 'quota', quota: currentQuota() }); }
+
 function connect() {
   log(`connecting ${cfg.serverUrl} …`);
   ws = new WebSocket(cfg.serverUrl);
@@ -539,8 +543,8 @@ function connect() {
       quota: currentQuota(),
     });
     if (hbTimer) clearInterval(hbTimer);
-    // 心跳带上额度状态: 服务端据此实时判定该 client 可否派单(额度不足=当作不可派, 换人)。
-    hbTimer = setInterval(() => send({ type: 'heartbeat', quota: currentQuota() }), cfg.heartbeatMs);
+    // 心跳只保活(精简); 额度改走独立 'quota' 消息(register_ack 后 + 每次 /usage 刷新后发)。
+    hbTimer = setInterval(() => send({ type: 'heartbeat' }), cfg.heartbeatMs);
   });
 
   ws.on('message', (data) => {
@@ -557,6 +561,7 @@ function connect() {
           send({ type: 'reconnected', was_busy: busy, repo: runningJob ? runningJob.repo : '', pr_num: runningJob ? runningJob.pr_num : '' });
         }
         everRegistered = true;
+        sendQuota();   // 注册后立即上报一次当前额度(心跳不再带 quota)
         identity = { open_id: msg.open_id, name: msg.name, recommended_version: msg.recommended_version || null, upgrade: msg.upgrade || null };
         if (Array.isArray(msg.managed_repos)) managedRepos = msg.managed_repos;
         log(`registered as ${msg.name} (${msg.open_id}) ✓  本机 v${CLIENT_VERSION}，服务端推荐 v${msg.recommended_version || '?'}`);
