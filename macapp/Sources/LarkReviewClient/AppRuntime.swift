@@ -55,11 +55,11 @@ final class AppRuntime {
             }
         }
 
-        // Claude 额度查询: 立即一次 + 每 2min(headless `claude -p /usage`, 零 token 消耗)。
+        // Claude 额度查询: 立即一次 + 每 10min(headless `claude -p /usage`, 零 token; 派活前还会再查一次)。
         usageTask = Task { @MainActor [state] in
             while !Task.isCancelled {
                 await QuotaMonitor.shared.refreshUsage(config: state.config)
-                try? await Task.sleep(for: .seconds(120))
+                try? await Task.sleep(for: .seconds(600))
             }
         }
     }

@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.5.6';
+const CLIENT_VERSION = '1.5.7';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -148,8 +148,8 @@ function parseResetToEpoch(text, kind) {
 // 比 statusline 快照稳: 不依赖交互、不碰用户的 statusLine、纯跑 review 的机器也能查。
 let usageQuota = null;            // { five_hour_pct, five_hour_reset_at, seven_day_pct, seven_day_reset_at }
 let usageQuotaAt = 0;            // 上次成功查询时刻(ms)
-const USAGE_POLL_MS = 120000;    // 每 2 分钟查一次
-const USAGE_FRESH_MS = 360000;   // 结果 6 分钟内视为新鲜; 连续失败变旧 → 上报无百分比(hub 显示 —)
+const USAGE_POLL_MS = 600000;    // 每 10 分钟查一次(派活前还会再查一次拿最新值)
+const USAGE_FRESH_MS = 900000;   // 结果 15 分钟内视为新鲜(> 轮询间隔); 连续失败变旧 → 上报无百分比(hub 显示 —)
 
 // 把 /usage 的 "Jul 10 at 3pm" 这类文案(本机时区, 与 /usage 显示时区一致)解析成 epoch ms。
 function parseUsageReset(s) {
@@ -178,20 +178,24 @@ function parseUsageText(text) {
   return (out.five_hour_pct != null || out.seven_day_pct != null) ? out : null;
 }
 // 跑 `claude -p /usage --output-format json` 并解析。成功→更新缓存; 失败/超时→不动(变旧后失效)。
+// 返回 Promise(总 resolve, 不 reject), 供"派活前先查一次"await。
 function pollUsage() {
-  let done = false, stdout = '', child;
-  try { child = spawn(cfg.claudePath, ['-p', '/usage', '--output-format', 'json'], { stdio: ['ignore', 'pipe', 'ignore'] }); }
-  catch (e) { logErr(`查额度(/usage)启动失败: ${e.message}`); return; }
-  const to = setTimeout(() => { if (!done) { done = true; try { child.kill('SIGKILL'); } catch {} } }, 25000);
-  if (child.stdout) child.stdout.on('data', (d) => { stdout += d; });
-  child.on('error', (e) => { if (!done) { done = true; clearTimeout(to); logErr(`查额度(/usage)出错: ${e.message}`); } });
-  child.on('close', () => {
-    if (done) return; done = true; clearTimeout(to);
-    let text = stdout;
-    try { const j = JSON.parse(stdout); if (j && typeof j.result === 'string') text = j.result; } catch { /* 非 json 按纯文本 */ }
-    const parsed = parseUsageText(text);
-    if (parsed) { usageQuota = parsed; usageQuotaAt = Date.now(); }
-    else logErr('查额度(/usage): 未解析出 session/week 百分比(claude 版本过旧?)');
+  return new Promise((resolve) => {
+    let done = false, stdout = '', child, to;
+    const finish = () => { if (done) return; done = true; clearTimeout(to); resolve(); };
+    try { child = spawn(cfg.claudePath, ['-p', '/usage', '--output-format', 'json'], { stdio: ['ignore', 'pipe', 'ignore'] }); }
+    catch (e) { logErr(`查额度(/usage)启动失败: ${e.message}`); return resolve(); }
+    to = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} finish(); }, 25000);
+    if (child.stdout) child.stdout.on('data', (d) => { stdout += d; });
+    child.on('error', (e) => { logErr(`查额度(/usage)出错: ${e.message}`); finish(); });
+    child.on('close', () => {
+      let text = stdout;
+      try { const j = JSON.parse(stdout); if (j && typeof j.result === 'string') text = j.result; } catch { /* 非 json 按纯文本 */ }
+      const parsed = parseUsageText(text);
+      if (parsed) { usageQuota = parsed; usageQuotaAt = Date.now(); }
+      else logErr('查额度(/usage): 未解析出 session/week 百分比(claude 版本过旧?)');
+      finish();
+    });
   });
 }
 
@@ -425,6 +429,16 @@ async function runReviewJob(job) {
   const conf = cfg.repos[job.repo];
   // hub 已校验 repo，这里再防一手。
   if (!conf) return { exit_code: 1, log_tail: `本机未配置 repo ${job.repo}`, verdict: '', general_comment_url: '', inline_count: '?', result_line: '' };
+
+  // 派活前先查一次最新额度: 不足就【拒接本单】(不跑 review), 交服务端改派给有额度的人。
+  // 上报的 quota 也让 hub 立即记为额度不足 → 下一轮 pick 排除该人。
+  await pollUsage();
+  const q0 = currentQuota();
+  if (q0.ok === false) {
+    log(`派活前自查: Claude 额度不足(${q0.reason || '?'}), 拒接 PR #${job.pr_num}, 交服务端改派`);
+    return { exit_code: 0, log_tail: `本机 Claude 额度不足(${q0.reason || ''}), 已拒接本单, 交由服务端改派给有额度的人`,
+      verdict: '', general_comment_url: '', inline_count: '?', result_line: '', quota: q0, declined_quota: true };
+  }
 
   send({ type: 'review_progress', job_id: job.job_id, stage: 'worktree' });
   const wt = await ensureWorktree(conf.mainRepo, conf.worktreeBase, job.pr_num, job.branch, job.provider);

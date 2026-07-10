@@ -45,6 +45,17 @@ final class ReviewCoordinator {
             return ReviewResult(exitCode: 1, logTail: "本机未配置 repo \(job.repo)")
         }
 
+        // 派活前先查一次最新额度: 不足就【拒接本单】(不跑 review), 交服务端改派给有额度的人。
+        await QuotaMonitor.shared.refreshUsage(config: cfg)
+        let q0 = QuotaMonitor.shared.current(config: cfg)
+        if q0.ok == false {
+            LogStore.shared.log("派活前自查: Claude 额度不足(\(q0.reason ?? "?")), 拒接 PR #\(job.pr_num), 交服务端改派")
+            var r = ReviewResult(exitCode: 0, logTail: "本机 Claude 额度不足(\(q0.reason ?? "")), 已拒接本单, 交由服务端改派给有额度的人")
+            r.quota = q0
+            r.declinedQuota = true
+            return r
+        }
+
         sendMessage(.reviewProgress(jobId: job.job_id, stage: "worktree"))
         onStageChange?(job, "worktree")
         let wt = await WorktreeManager.ensureWorktree(

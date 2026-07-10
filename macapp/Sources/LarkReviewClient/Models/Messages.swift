@@ -28,7 +28,7 @@ enum OutboundMessage {
                     "exit_code": r.exitCode, "log_tail": r.logTail,
                     "result_line": r.resultLine, "verdict": r.verdict,
                     "general_comment_url": r.generalCommentUrl, "inline_count": r.inlineCount,
-                    "quota": r.quota.jsonObject]
+                    "quota": r.quota.jsonObject, "declined_quota": r.declinedQuota]
         case let .reconnected(wasBusy, repo, prNum):
             return ["type": "reconnected", "was_busy": wasBusy, "repo": repo,
                     "pr_num": prNum.map { $0 as Any } ?? ""]
@@ -52,6 +52,8 @@ struct ReviewResult: Equatable {
     var inlineCount: String = "?"
     /// 本机 Claude 额度状态(随结果上报; 命中限额那次尤其关键)。
     var quota: QuotaStatus = QuotaStatus()
+    /// 派活前自查额度不足 → 拒接本单(未跑 review), 交服务端改派。
+    var declinedQuota: Bool = false
 }
 
 // ---------- 入站 ----------
