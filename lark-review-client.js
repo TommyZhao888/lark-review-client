@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.5.4';
+const CLIENT_VERSION = '1.5.5';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -196,15 +196,14 @@ function ensureStatuslineInstalled() {
     let settings = {};
     try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch { settings = {}; }
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
-    const snapAbs = String(cfg.quotaSnapshotPath || '').replace(/^~/, os.homedir());
     const innerFile = path.join(destDir, 'inner-statusline.json');
     const existing = settings.statusLine;
     let innerToSave = null;
     if (existing && existing.command) {
       const cmd = String(existing.command);
       if (cmd.includes('statusline-quota.sh')) return;                       // 已是我们的(可能已包装)→ 幂等
-      if (/claude-hud/i.test(cmd) && snapAbs) { bridgeClaudeHud(snapAbs); return; }  // claude-hud → 桥接(更轻, 不动 statusLine)
-      // 其它自定义 statusline → 包装: 记下原命令, 我们的脚本每次先写快照再链式调用它并显示其输出(共存)。
+      // 任何已有 statusLine(含 claude-hud)→ 包装: 我们的脚本每次自己从 stdin 的 rate_limits 写快照
+      // (不依赖对方工具写), 再链式调用原命令显示其输出(共存)。比桥接第三方配置更稳。
       innerToSave = { type: existing.type || 'command', command: cmd };
     }
     // 安装我们的脚本为 statusLine; 有原 statusline 就存起来供链式调用, 没有则清掉旧的 inner。
@@ -223,30 +222,6 @@ function ensureStatuslineInstalled() {
   } catch (e) { logErr(`自动配置 statusLine 失败(不影响 review): ${e.message}`); }
 }
 
-// 你的 statusLine 是 claude-hud 时的桥接: 让 claude-hud 把官方 rate_limits 快照写到我们读的路径
-// (claude-hud 自带 display.externalUsageWritePath, 格式与我们一致), 从而不改你的 statusLine 也能拿到额度。
-// 仅当 claude-hud 未配过该项(或已指向我们的路径)才设; 已指向别处则不覆盖。路径须绝对 .json。
-function bridgeClaudeHud(snapAbs) {
-  try {
-    if (!snapAbs || !snapAbs.startsWith('/') || !snapAbs.endsWith('.json')) {
-      log(`claude-hud 桥接跳过: 额度快照路径需为绝对 .json 路径(当前 ${snapAbs || '空'})`); return;
-    }
-    const cfgPath = path.join(os.homedir(), '.claude', 'plugins', 'claude-hud', 'config.json');
-    let hud = {};
-    try { hud = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch { hud = {}; }
-    if (!hud || typeof hud !== 'object' || Array.isArray(hud)) hud = {};
-    if (!hud.display || typeof hud.display !== 'object' || Array.isArray(hud.display)) hud.display = {};
-    const cur = hud.display.externalUsageWritePath;
-    if (cur === snapAbs) return;                                   // 已桥接, 幂等
-    if (cur) { log(`claude-hud 已配置 externalUsageWritePath=${cur}(非本工具路径), 不覆盖; 如需 hub 显示额度, 把 quotaSnapshotPath 指到该路径。`); return; }
-    hud.display.externalUsageWritePath = snapAbs;
-    fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
-    const tmp = cfgPath + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(hud, null, 2) + '\n');
-    fs.renameSync(tmp, cfgPath);
-    log(`检测到 claude-hud statusLine, 已让它把额度快照写到 ${snapAbs}(你的 statusLine 未改动; 下次交互刷新即生效, hub 显示 5 小时百分比)`);
-  } catch (e) { logErr(`桥接 claude-hud 失败(不影响 review): ${e.message}`); }
-}
 
 // ---------- Mac 通知栏提醒(收到/执行中/完成/断连/重连); 非 macOS 或 cfg.notify=false 时跳过 ----------
 function notify(title, message) {

@@ -27,15 +27,12 @@ enum StatuslineInstaller {
            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             settings = obj
         }
-        let snapAbs = expand(config.quotaSnapshotPath)
         let innerFile = dir + "/inner-statusline.json"
         var innerToSave: [String: Any]? = nil
         if let sl = settings["statusLine"] as? [String: Any], let cmd = sl["command"] as? String {
             if cmd.contains("statusline-quota.sh") { return }                                   // 已是我们的(可能已包装)→ 幂等
-            if cmd.range(of: "claude-hud", options: .caseInsensitive) != nil, !snapAbs.isEmpty { // claude-hud → 桥接(更轻)
-                bridgeClaudeHud(snapAbs); return
-            }
-            // 其它自定义 statusline → 包装: 记下原命令, 我们的脚本每次先写快照再链式调用它显示其输出(共存)。
+            // 任何已有 statusLine(含 claude-hud)→ 包装: 我们的脚本每次自己从 stdin 的 rate_limits 写快照
+            // (不依赖对方工具写), 再链式调用原命令显示其输出(共存)。比桥接第三方配置更稳。
             innerToSave = ["type": (sl["type"] as? String) ?? "command", "command": cmd]
         }
         if let inner = innerToSave {
@@ -55,41 +52,6 @@ enum StatuslineInstaller {
                 : "已自动配置 Claude statusLine 写额度快照 → \(settingsPath); 交互用 Claude 时刷新 5 小时额度, hub 即可显示百分比")
         } catch {
             LogStore.shared.log("自动配置 statusLine 失败(不影响 review): \(error.localizedDescription)")
-        }
-    }
-
-    private static func expand(_ p: String) -> String {
-        p.hasPrefix("~") ? NSHomeDirectory() + String(p.dropFirst()) : p
-    }
-
-    /// statusLine 是 claude-hud 时的桥接: 让 claude-hud 把官方 rate_limits 快照写到我们读的路径
-    /// (claude-hud 自带 display.externalUsageWritePath, 格式与我们一致), 不改你的 statusLine 也能拿到额度。
-    /// 仅当 claude-hud 未配过该项(或已指向我们路径)才设; 已指向别处不覆盖。
-    private static func bridgeClaudeHud(_ snapAbs: String) {
-        guard snapAbs.hasPrefix("/"), snapAbs.hasSuffix(".json") else {
-            LogStore.shared.log("claude-hud 桥接跳过: 额度快照路径需为绝对 .json 路径")
-            return
-        }
-        let cfgPath = NSHomeDirectory() + "/.claude/plugins/claude-hud/config.json"
-        let fm = FileManager.default
-        var hud: [String: Any] = [:]
-        if let data = fm.contents(atPath: cfgPath),
-           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { hud = obj }
-        var display = (hud["display"] as? [String: Any]) ?? [:]
-        if let cur = display["externalUsageWritePath"] as? String {
-            if cur == snapAbs { return }
-            LogStore.shared.log("claude-hud 已配置 externalUsageWritePath=\(cur), 不覆盖; 如需 hub 显示额度, 把 quotaSnapshotPath 指到该路径。")
-            return
-        }
-        display["externalUsageWritePath"] = snapAbs
-        hud["display"] = display
-        do {
-            try fm.createDirectory(atPath: (cfgPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-            let data = try JSONSerialization.data(withJSONObject: hud, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: URL(fileURLWithPath: cfgPath), options: .atomic)
-            LogStore.shared.log("检测到 claude-hud statusLine, 已让它把额度快照写到 \(snapAbs)(statusLine 未改动; 下次交互刷新即生效)")
-        } catch {
-            LogStore.shared.log("桥接 claude-hud 失败(不影响 review): \(error.localizedDescription)")
         }
     }
 
