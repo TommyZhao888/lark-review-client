@@ -1,0 +1,64 @@
+import Foundation
+
+/// 自动把额度快照脚本配成 Claude Code 的 statusLine, 免逐台手动设置(对齐 Node 版 ensureStatuslineInstalled)。
+/// 仅当【未配过】statusLine 才装(绝不覆盖已有的, 如 claude-hud); 脚本写到 ~/.lark-review-client/statusline-quota.sh。
+/// 注意: statusLine 只在【交互】使用 Claude 时触发 → 纯跑 review、平时不交互用 Claude 的机器快照不会刷新
+/// (>15min 过期, hub 显示 —, 属正常, 非 bug)。config.autoStatusline=false 可关闭。
+enum StatuslineInstaller {
+
+    static func ensure(config: Config) {
+        guard config.autoStatusline else { return }
+        let home = NSHomeDirectory()
+        let dir = home + "/.lark-review-client"
+        let scriptPath = dir + "/statusline-quota.sh"
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try SCRIPT.write(toFile: scriptPath, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
+        } catch {
+            LogStore.shared.log("额度快照脚本写入失败(不影响 review): \(error.localizedDescription)")
+            return
+        }
+
+        let settingsPath = home + "/.claude/settings.json"
+        var settings: [String: Any] = [:]
+        if let data = fm.contents(atPath: settingsPath),
+           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            settings = obj
+        }
+        if let sl = settings["statusLine"] as? [String: Any], let cmd = sl["command"] as? String {
+            if !cmd.contains("statusline-quota.sh") {
+                LogStore.shared.log("检测到你已配置 Claude statusLine, 不覆盖。如需 hub 显示额度百分比, 可改用 \(scriptPath), 或设 autoStatusline=false 静默。")
+            }
+            return   // 已是我们的 → 幂等; 别人的 → 尊重不动
+        }
+        settings["statusLine"] = ["type": "command", "command": "bash '\(scriptPath)'"]
+        do {
+            try fm.createDirectory(atPath: home + "/.claude", withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: URL(fileURLWithPath: settingsPath), options: .atomic)
+            LogStore.shared.log("已自动配置 Claude statusLine 写额度快照 → \(settingsPath); 交互用 Claude 时刷新 5 小时额度, hub 即可显示百分比")
+        } catch {
+            LogStore.shared.log("自动配置 statusLine 失败(不影响 review): \(error.localizedDescription)")
+        }
+    }
+
+    /// 精简版 statusline 脚本(与仓库根 statusline-quota.sh 等效: 落 rate_limits 快照 + 打印状态行)。
+    /// 用 Swift 原始字符串 #"""..."""# 内嵌, 避免 \( 被当成插值。
+    private static let SCRIPT = #"""
+    #!/usr/bin/env bash
+    # 由 lark-review-client(macapp)自动安装。把 Claude statusLine 的 rate_limits 落成快照,
+    # 供 review 客户端前瞻式判断额度(5小时窗已用%)。仅交互用 Claude 时刷新。
+    set -uo pipefail
+    SNAP="${LARK_QUOTA_SNAPSHOT:-$HOME/.claude/lark-quota.json}"
+    IN="$(cat)"; [ -z "$IN" ] && { echo "lark-quota"; exit 0; }
+    if ! command -v jq >/dev/null 2>&1; then echo "claude"; exit 0; fi
+    if [ "$(printf '%s' "$IN" | jq -r 'if .rate_limits then 1 else 0 end' 2>/dev/null)" = "1" ]; then
+      mkdir -p "$(dirname "$SNAP")" 2>/dev/null || true
+      T="$SNAP.$$.tmp"
+      printf '%s' "$IN" | jq -c '{updated_at:(now|todate),five_hour:{used_percentage:(.rate_limits.five_hour.used_percentage//null),resets_at:(.rate_limits.five_hour.resets_at//null)},seven_day:{used_percentage:(.rate_limits.seven_day.used_percentage//null),resets_at:(.rate_limits.seven_day.resets_at//null)}}' > "$T" 2>/dev/null && mv "$T" "$SNAP" 2>/dev/null || rm -f "$T" 2>/dev/null || true
+    fi
+    printf '%s' "$IN" | jq -r '(.model.display_name//"claude") as $m|(.rate_limits.five_hour.used_percentage) as $f|(.rate_limits.seven_day.used_percentage) as $d|if $f!=null then "\($m) | 5h \($f)% | 7d \($d//0)%" else $m end' 2>/dev/null || echo claude
+    """#
+}

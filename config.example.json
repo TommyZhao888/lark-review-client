@@ -8,11 +8,7 @@
   "worktreeMaxAgeDays": 14,
   "configPort": 8790,
 
-  "_note_quota": "额度感知(可选前瞻式): 装 statusline-quota.sh 作为 Claude Code 的 statusLine 后, 填 quotaSnapshotPath 指向它写的快照, 客户端会在 5 小时窗已用 >= quotaFiveHourThreshold(默认90)时上报额度不足, 服务端就不再派 review 给你、自动换在线且有额度的人。留空 quotaSnapshotPath = 只用反应式(命中限额后才知道)。",
-  "quotaSnapshotPath": "",
-  "quotaFiveHourThreshold": 90,
-  "quotaSevenDayThreshold": 95,
-  "quotaSnapshotFreshnessMs": 900000,
+  "_note_quota": "额度感知【默认自动开启, 一般无需在此配置】: 客户端启动会自动把 statusline-quota.sh 配成 Claude Code 的 statusLine(仅当你没配过 statusLine, 不覆盖 claude-hud 等), 并默认读 ~/.claude/lark-quota.json 快照。你【交互】使用 Claude 时快照刷新, 5 小时窗已用 >= 90% 就上报额度不足, 服务端不再派 review 给你、自动换有额度的人。纯跑 review、平时不交互用 Claude 的机器快照会过期(hub 显示 —), 仍有命中限额的反应式兜底。要关闭自动配置: autoStatusline=false; 要用别的快照路径/阈值可覆盖下面几项(通常不填)。",
 
   "repos": {
     "Liontech-tw/lion-trip-app-global": {

@@ -25,6 +25,7 @@ final class AppRuntime {
 
         state.config = ConfigStore.load()
         LogStore.shared.log("config \(ConfigStore.configPath) loaded, repos: \(state.config.repos.keys.sorted().joined(separator: ", ").isEmpty ? "(无)" : state.config.repos.keys.sorted().joined(separator: ", ")) (身份由服务端按 token 下发)")
+        StatuslineInstaller.ensure(config: state.config)   // 自动配置额度快照 statusLine(仅当未配过; 幂等)
 
         LogStore.shared.onLine = { line in
             Task { @MainActor in AppRuntime.shared.state.appendLog(line) }

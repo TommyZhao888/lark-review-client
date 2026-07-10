@@ -34,6 +34,7 @@ enum ConfigStore {
         if let q5 = obj["quotaFiveHourThreshold"] as? Int, q5 > 0 { cfg.quotaFiveHourThreshold = q5 }
         if let q7 = obj["quotaSevenDayThreshold"] as? Int, q7 > 0 { cfg.quotaSevenDayThreshold = q7 }
         if let qf = obj["quotaSnapshotFreshnessMs"] as? Int, qf > 0 { cfg.quotaSnapshotFreshnessMs = qf }
+        if let asl = obj["autoStatusline"] as? Bool { cfg.autoStatusline = asl }
         if let repos = obj["repos"] as? [String: Any] {
             for (name, v) in repos {
                 guard let rc = v as? [String: Any] else { continue }

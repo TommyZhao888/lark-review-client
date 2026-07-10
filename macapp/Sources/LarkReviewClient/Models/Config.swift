@@ -1,7 +1,7 @@
 import Foundation
 
 /// 客户端版本：升级功能时手动 +1（与 Info.plist 保持一致）。服务端据此判断是否提示升级。
-let CLIENT_VERSION = "1.5.2"
+let CLIENT_VERSION = "1.5.3"
 
 /// 单个 repo 的本机配置（~/.lark-review-client.json 的 repos["owner/repo"]）。
 struct RepoConfig: Codable, Equatable {
@@ -27,14 +27,17 @@ struct Config: Equatable {
     var autoUpdate: Bool = false
 
     // ---- Claude 额度(quota)相关 ----
-    /// 前瞻式额度快照路径(statusline 写的 rate_limits)。空=不启用前瞻式(仍有反应式兜底)。
-    var quotaSnapshotPath: String = ""
+    /// 前瞻式额度快照路径(statusline 写的 rate_limits)。默认指向标准路径(自动启用前瞻式):
+    /// 快照不存在/过期时读到无百分比(hub 显示 —), 有 statusline 写入后自动出现百分比。设为 "" 关闭。
+    var quotaSnapshotPath: String = NSHomeDirectory() + "/.claude/lark-quota.json"
     /// 5 小时窗已用 >= 此% 视为额度不足(不再被派 review)。
     var quotaFiveHourThreshold: Int = 90
     /// 7 天窗已用 >= 此% 视为额度不足。
     var quotaSevenDayThreshold: Int = 95
     /// 快照超过此毫秒数未更新视为过期(不采信, 退回反应式)。
     var quotaSnapshotFreshnessMs: Int = 900000
+    /// 自动把额度快照脚本配成 Claude statusLine(仅当未配过 statusLine); false 关闭。
+    var autoStatusline: Bool = true
 
     /// 配置是否完整到可以连接服务端。repos 不是硬性条件：
     /// 项目清单由服务端下发，没配 repo 也允许连接注册（只是不会被派单）。

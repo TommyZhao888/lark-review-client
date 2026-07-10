@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.5.2';
+const CLIENT_VERSION = '1.5.3';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -64,10 +64,13 @@ function loadConfig() {
   // 前瞻式: 读一个由 statusline 写的 rate_limits 快照(claude-hud 或本仓库 statusline-quota.sh)。
   // headless(--print)不触发 statusline, 故快照仅在本机【交互使用 Claude】时刷新; 限额是账号级的,
   // 交互产生的快照同样反映 headless review 的消耗。快照过期/缺失 → 退回反应式(命中限额才知道)。
-  cfg.quotaSnapshotPath = cfg.quotaSnapshotPath || '';                 // 空=不启用前瞻式(仍有反应式兜底)
+  // 默认指向标准快照路径(自动启用前瞻式): 快照不存在/过期时读到 null → 上报无百分比(hub 显示 —),
+  // 有 statusline 写入后自动出现百分比。显式设为 "" 可关闭前瞻式(仅留反应式)。
+  cfg.quotaSnapshotPath = (cfg.quotaSnapshotPath != null) ? cfg.quotaSnapshotPath : path.join(os.homedir(), '.claude', 'lark-quota.json');
   cfg.quotaFiveHourThreshold = cfg.quotaFiveHourThreshold || 90;       // 5 小时窗已用 >= 此% 视为额度不足
   cfg.quotaSevenDayThreshold = cfg.quotaSevenDayThreshold || 95;       // 7 天窗已用 >= 此% 视为额度不足
   cfg.quotaSnapshotFreshnessMs = cfg.quotaSnapshotFreshnessMs || 900000; // 快照超过 15min 未更新视为过期(不采信)
+  cfg.autoStatusline = cfg.autoStatusline !== false;                   // 自动把额度快照脚本配成 Claude statusLine(仅当你没配过 statusLine); false 关闭
   return cfg;
 }
 
@@ -170,6 +173,41 @@ function currentQuota() {
   }
   if (snap && snap.ok === false) return { ok: false, reason: snap.reason, reset_at: snap.reset_at || null, five_hour_pct: f5 };
   return { ok: true, reason: null, reset_at: null, five_hour_pct: f5 };
+}
+
+// 自动把额度快照脚本配成 Claude Code 的 statusLine, 免逐台手动设置。
+// 仅当你【没有】配过 statusLine 才装(绝不覆盖已有的, 如 claude-hud); 脚本复制到稳定路径
+// ~/.lark-review-client/statusline-quota.sh 并指向它。cfg.autoStatusline=false 可关闭。
+// 注意: statusLine 只在【交互】用 Claude 时触发 → 纯跑 review、平时不交互用 Claude 的机器快照
+// 不会刷新(hub 显示 —, 属正常, 非 bug)。
+function ensureStatuslineInstalled() {
+  if (!cfg.autoStatusline) return;
+  try {
+    const src = path.join(__dirname, 'statusline-quota.sh');
+    if (!fs.existsSync(src)) { log(`未找到 statusline-quota.sh(${src}), 跳过额度快照自动配置`); return; }
+    const destDir = path.join(os.homedir(), '.lark-review-client');
+    const dest = path.join(destDir, 'statusline-quota.sh');
+    fs.mkdirSync(destDir, { recursive: true });
+    fs.copyFileSync(src, dest);
+    fs.chmodSync(dest, 0o755);
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    let settings = {};
+    try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch { settings = {}; }
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
+    const existing = settings.statusLine;
+    if (existing && existing.command) {
+      if (!String(existing.command).includes('statusline-quota.sh')) {
+        log('检测到你已配置 Claude statusLine, 不覆盖。如需 hub 显示 5 小时额度百分比, 可改用 ~/.lark-review-client/statusline-quota.sh, 或把它的快照写入合并进你的 statusline(或设 autoStatusline:false 静默本提示)。');
+      }
+      return;   // 已是我们的 → 幂等无操作; 是别人的 → 尊重不动
+    }
+    settings.statusLine = { type: 'command', command: `bash '${dest}'` };
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    const tmp = settingsPath + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n');
+    fs.renameSync(tmp, settingsPath);
+    log(`已自动配置 Claude statusLine 写额度快照 → ${settingsPath}; 你交互使用 Claude 时会刷新 5 小时额度, hub 即可显示百分比`);
+  } catch (e) { logErr(`自动配置 statusLine 失败(不影响 review): ${e.message}`); }
 }
 
 // ---------- Mac 通知栏提醒(收到/执行中/完成/断连/重连); 非 macOS 或 cfg.notify=false 时跳过 ----------
@@ -765,6 +803,7 @@ function startConfigServer() {
   srv.listen(port, '127.0.0.1');
 }
 
+ensureStatuslineInstalled();   // 自动配置额度快照 statusLine(仅当未配过; 幂等)
 startConfigServer();   // 配置页先起(无论是否已配置), 供首次填写 / 后续修改
 if (configReady(cfg)) {
   connect();
