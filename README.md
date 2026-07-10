@@ -18,8 +18,12 @@
 
 ```bash
 brew tap tommyzhao888/lark-review-client https://github.com/TommyZhao888/lark-review-client.git
+brew trust tommyzhao888/lark-review-client   # 首次: 授信第三方 tap(新版 Homebrew 要求)
 brew install --cask lark-review-client
 ```
+
+> 中间的 `brew trust` 是**首次安装必做**：新版 Homebrew 默认要求先授信第三方 tap，跳过会报
+> `Refusing to load cask … from untrusted tap`；旧版 Homebrew 没有该命令、报「未知命令」时忽略这行即可。
 
 装完直接从「应用程序」打开（cask 已自动处理 quarantine，无需右键打开 / 无需 xattr）。
 要求 macOS 14+、Apple Silicon。首次使用：菜单栏点 🦁 → 设置… → 填 `serverUrl` 和管理员发的

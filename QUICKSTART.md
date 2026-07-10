@@ -9,8 +9,10 @@ GitHub 账号提交 review; 你不在线时则照常 @ 你人工催办。
 > **macOS 用户**：推荐用原生菜单栏 App（免开浏览器配置页 / 免 SwiftBar / 自带自更新），Homebrew 安装：
 > ```bash
 > brew tap tommyzhao888/lark-review-client https://github.com/TommyZhao888/lark-review-client.git
+> brew trust tommyzhao888/lark-review-client   # 首次: 授信第三方 tap(新版 Homebrew 要求)
 > brew install --cask lark-review-client
 > ```
+> `brew trust` 是首次必做(新版 Homebrew 要求授信第三方 tap; 旧版无此命令可忽略)。
 > 要求 macOS 14+、Apple Silicon。详见 README「安装 Mac App」一节与 `macapp/README.md`。下面是 Node 版的快速开始。
 
 ## 0. 前置(本机先装好并登录)
