@@ -13,6 +13,7 @@ final class AppRuntime {
     let notifications = NotificationManager()
 
     private var pruneTask: Task<Void, Never>?
+    private var usageTask: Task<Void, Never>?
     private var started = false
     /// 已对该 recommended 版本自动尝试过更新，防失败后每次重连都重试（一次没成功就等用户手动/换轮）。
     private var autoUpdateTriedFor: String?
@@ -25,7 +26,7 @@ final class AppRuntime {
 
         state.config = ConfigStore.load()
         LogStore.shared.log("config \(ConfigStore.configPath) loaded, repos: \(state.config.repos.keys.sorted().joined(separator: ", ").isEmpty ? "(无)" : state.config.repos.keys.sorted().joined(separator: ", ")) (身份由服务端按 token 下发)")
-        StatuslineInstaller.ensure(config: state.config)   // 自动配置额度快照 statusLine(仅当未配过; 幂等)
+        StatuslineInstaller.cleanup()   // 还原旧版为额度快照改过的 statusLine(现改用 /usage 查额度)
 
         LogStore.shared.onLine = { line in
             Task { @MainActor in AppRuntime.shared.state.appendLog(line) }
@@ -53,11 +54,20 @@ final class AppRuntime {
                 try? await Task.sleep(for: .seconds(6 * 3600))
             }
         }
+
+        // Claude 额度查询: 立即一次 + 每 2min(headless `claude -p /usage`, 零 token 消耗)。
+        usageTask = Task { @MainActor [state] in
+            while !Task.isCancelled {
+                await QuotaMonitor.shared.refreshUsage(config: state.config)
+                try? await Task.sleep(for: .seconds(120))
+            }
+        }
     }
 
     func shutdown() {
         LogStore.shared.log("bye")
         pruneTask?.cancel()
+        usageTask?.cancel()
         ws.shutdown()
         ChildProcessRegistry.shared.terminateAll()
     }

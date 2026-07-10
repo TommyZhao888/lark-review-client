@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.5.5';
+const CLIENT_VERSION = '1.5.6';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -144,82 +144,98 @@ function parseResetToEpoch(text, kind) {
   return Number.isFinite(epoch) ? epoch : fallback();
 }
 
-// 读 statusline 写的 rate_limits 快照(前瞻式)。返回 {ok:false,...} / {ok:true} / null(无快照/过期/未启用)。
-function readSnapshotQuota() {
-  const p = cfg.quotaSnapshotPath;
-  if (!p) return null;
-  let snap;
-  try { snap = JSON.parse(fs.readFileSync(p.replace(/^~/, os.homedir()), 'utf8')); }
-  catch { return null; }
-  const upd = Date.parse(snap.updated_at || '');
-  if (!Number.isFinite(upd) || Date.now() - upd > cfg.quotaSnapshotFreshnessMs) return null; // 过期不采信
-  const pct = (w) => (w && typeof w.used_percentage === 'number') ? w.used_percentage : null;
-  const resetMs = (w) => { const v = w && w.resets_at; if (v == null) return null; const n = typeof v === 'number' ? (v > 1e12 ? v : v * 1000) : Date.parse(v); return Number.isFinite(n) ? n : null; };
-  const f5 = pct(snap.five_hour), d7 = pct(snap.seven_day);
-  const f5reset = resetMs(snap.five_hour);   // 5 小时窗恢复时间(ms), 始终带出供派活参考
-  // five_hour_pct / five_hour_reset_at 始终带出(供 hub/管理页显示"5小时已用%"+"恢复时间"), 与 ok 与否无关。
-  if (f5 != null && f5 >= cfg.quotaFiveHourThreshold) return { ok: false, reason: `five_hour_${f5}pct`, reset_at: f5reset, five_hour_pct: f5, five_hour_reset_at: f5reset };
-  if (d7 != null && d7 >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${d7}pct`, reset_at: resetMs(snap.seven_day), five_hour_pct: f5, five_hour_reset_at: f5reset };
-  return { ok: true, five_hour_pct: f5, five_hour_reset_at: f5reset };
+// ---- 用 `claude -p /usage` 查额度(headless 可用, 零 token 消耗 ~1s, 自带重置时间)----
+// 比 statusline 快照稳: 不依赖交互、不碰用户的 statusLine、纯跑 review 的机器也能查。
+let usageQuota = null;            // { five_hour_pct, five_hour_reset_at, seven_day_pct, seven_day_reset_at }
+let usageQuotaAt = 0;            // 上次成功查询时刻(ms)
+const USAGE_POLL_MS = 120000;    // 每 2 分钟查一次
+const USAGE_FRESH_MS = 360000;   // 结果 6 分钟内视为新鲜; 连续失败变旧 → 上报无百分比(hub 显示 —)
+
+// 把 /usage 的 "Jul 10 at 3pm" 这类文案(本机时区, 与 /usage 显示时区一致)解析成 epoch ms。
+function parseUsageReset(s) {
+  if (!s) return null;
+  const m = String(s).trim().match(/([A-Za-z]{3,})\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!m) return null;
+  const months = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+  const mon = months[m[1].slice(0, 3).toLowerCase()]; if (mon == null) return null;
+  const day = parseInt(m[2], 10); let hh = parseInt(m[3], 10); const mm = m[4] ? parseInt(m[4], 10) : 0;
+  const ap = (m[5] || '').toLowerCase();
+  if (ap === 'pm' && hh < 12) hh += 12;
+  if (ap === 'am' && hh === 12) hh = 0;
+  const now = new Date();
+  let d = new Date(now.getFullYear(), mon, day, hh, mm, 0, 0);
+  if (d.getTime() < now.getTime() - 3 * 24 * 3600_000) d = new Date(now.getFullYear() + 1, mon, day, hh, mm, 0, 0);  // 跨年
+  return d.getTime();
+}
+// 解析 /usage 文本: "Current session: N% used · resets ..."(=5 小时窗)/ "Current week (all models): M% used · resets ..."。
+function parseUsageText(text) {
+  if (!text) return null;
+  const out = {};
+  let m = text.match(/Current session:\s*(\d+)%\s*used(?:[^\n]*?\bresets\s*([^\n(]+))?/i);
+  if (m) { out.five_hour_pct = parseInt(m[1], 10); out.five_hour_reset_at = parseUsageReset(m[2]); }
+  m = text.match(/Current week \(all models\):\s*(\d+)%\s*used(?:[^\n]*?\bresets\s*([^\n(]+))?/i);
+  if (m) { out.seven_day_pct = parseInt(m[1], 10); out.seven_day_reset_at = parseUsageReset(m[2]); }
+  return (out.five_hour_pct != null || out.seven_day_pct != null) ? out : null;
+}
+// 跑 `claude -p /usage --output-format json` 并解析。成功→更新缓存; 失败/超时→不动(变旧后失效)。
+function pollUsage() {
+  let done = false, stdout = '', child;
+  try { child = spawn(cfg.claudePath, ['-p', '/usage', '--output-format', 'json'], { stdio: ['ignore', 'pipe', 'ignore'] }); }
+  catch (e) { logErr(`查额度(/usage)启动失败: ${e.message}`); return; }
+  const to = setTimeout(() => { if (!done) { done = true; try { child.kill('SIGKILL'); } catch {} } }, 25000);
+  if (child.stdout) child.stdout.on('data', (d) => { stdout += d; });
+  child.on('error', (e) => { if (!done) { done = true; clearTimeout(to); logErr(`查额度(/usage)出错: ${e.message}`); } });
+  child.on('close', () => {
+    if (done) return; done = true; clearTimeout(to);
+    let text = stdout;
+    try { const j = JSON.parse(stdout); if (j && typeof j.result === 'string') text = j.result; } catch { /* 非 json 按纯文本 */ }
+    const parsed = parseUsageText(text);
+    if (parsed) { usageQuota = parsed; usageQuotaAt = Date.now(); }
+    else logErr('查额度(/usage): 未解析出 session/week 百分比(claude 版本过旧?)');
+  });
 }
 
-// 汇总当前额度状态给服务端: 反应式优先(未过期), 否则看快照。默认 ok(未知不拦, 交给反应式兜底)。
-// five_hour_pct 尽量带上(仅当有新鲜快照时非空), 供管理页显示 5 小时已用百分比。
+// 汇总当前额度状态给服务端。反应式(命中限额)优先; 否则用 /usage 的 5 小时/7 天窗判定, 并带出百分比与恢复时间。
+// 默认 ok(拿不到 = 不拦, 交给反应式兜底; 管理页显示 —)。
 function currentQuota() {
-  const snap = readSnapshotQuota();
-  const f5 = (snap && typeof snap.five_hour_pct === 'number') ? snap.five_hour_pct : null;
-  const f5r = (snap && typeof snap.five_hour_reset_at === 'number') ? snap.five_hour_reset_at : null;
+  const u = (usageQuota && Date.now() - usageQuotaAt < USAGE_FRESH_MS) ? usageQuota : null;
+  const f5 = u && u.five_hour_pct != null ? u.five_hour_pct : null;
+  const f5r = u && u.five_hour_reset_at != null ? u.five_hour_reset_at : null;
   if (reactiveQuotaBlock) {
     if (reactiveQuotaBlock.reset_at && Date.now() >= reactiveQuotaBlock.reset_at) reactiveQuotaBlock = null;
     else return { ok: false, reason: reactiveQuotaBlock.reason, reset_at: reactiveQuotaBlock.reset_at || null, five_hour_pct: f5, five_hour_reset_at: f5r };
   }
-  if (snap && snap.ok === false) return { ok: false, reason: snap.reason, reset_at: snap.reset_at || null, five_hour_pct: f5, five_hour_reset_at: f5r };
+  if (u) {
+    if (f5 != null && f5 >= cfg.quotaFiveHourThreshold) return { ok: false, reason: `five_hour_${f5}pct`, reset_at: f5r, five_hour_pct: f5, five_hour_reset_at: f5r };
+    if (u.seven_day_pct != null && u.seven_day_pct >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${u.seven_day_pct}pct`, reset_at: u.seven_day_reset_at || null, five_hour_pct: f5, five_hour_reset_at: f5r };
+  }
   return { ok: true, reason: null, reset_at: null, five_hour_pct: f5, five_hour_reset_at: f5r };
 }
 
-// 自动把额度快照脚本配成 Claude Code 的 statusLine, 免逐台手动设置。
-// 仅当你【没有】配过 statusLine 才装(绝不覆盖已有的, 如 claude-hud); 脚本复制到稳定路径
-// ~/.lark-review-client/statusline-quota.sh 并指向它。cfg.autoStatusline=false 可关闭。
-// 注意: statusLine 只在【交互】用 Claude 时触发 → 纯跑 review、平时不交互用 Claude 的机器快照
-// 不会刷新(hub 显示 —, 属正常, 非 bug)。
-function ensureStatuslineInstalled() {
-  if (!cfg.autoStatusline) return;
+// 清理旧版(1.3~1.5.5)对 Claude statusLine 的改动: 现在改用 `claude -p /usage` 查额度, 不再需要 statusLine。
+// 若 statusLine 曾被我们设成/包装成额度脚本 → 还原你原来的 statusLine(inner-statusline.json)或移除我们加的,
+// 并删掉临时脚本/inner, 保持你的 Claude 环境干净。
+function cleanupOldStatusline() {
   try {
-    const src = path.join(__dirname, 'statusline-quota.sh');
-    if (!fs.existsSync(src)) { log(`未找到 statusline-quota.sh(${src}), 跳过额度快照自动配置`); return; }
     const destDir = path.join(os.homedir(), '.lark-review-client');
-    const dest = path.join(destDir, 'statusline-quota.sh');
-    fs.mkdirSync(destDir, { recursive: true });
-    fs.copyFileSync(src, dest);
-    fs.chmodSync(dest, 0o755);
-    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-    let settings = {};
-    try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch { settings = {}; }
-    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
     const innerFile = path.join(destDir, 'inner-statusline.json');
-    const existing = settings.statusLine;
-    let innerToSave = null;
-    if (existing && existing.command) {
-      const cmd = String(existing.command);
-      if (cmd.includes('statusline-quota.sh')) return;                       // 已是我们的(可能已包装)→ 幂等
-      // 任何已有 statusLine(含 claude-hud)→ 包装: 我们的脚本每次自己从 stdin 的 rate_limits 写快照
-      // (不依赖对方工具写), 再链式调用原命令显示其输出(共存)。比桥接第三方配置更稳。
-      innerToSave = { type: existing.type || 'command', command: cmd };
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    let settings = null;
+    try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch { settings = null; }
+    if (settings && settings.statusLine && typeof settings.statusLine.command === 'string'
+        && settings.statusLine.command.includes('statusline-quota.sh')) {
+      let inner = null;
+      try { inner = JSON.parse(fs.readFileSync(innerFile, 'utf8')); } catch { inner = null; }
+      if (inner && inner.command) settings.statusLine = { type: inner.type || 'command', command: inner.command };  // 还原原来的
+      else delete settings.statusLine;                                                                              // 当初无 statusline → 移除
+      const tmp = settingsPath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n');
+      fs.renameSync(tmp, settingsPath);
+      log('已还原此前为额度快照修改的 Claude statusLine(现改用 /usage 查额度)');
     }
-    // 安装我们的脚本为 statusLine; 有原 statusline 就存起来供链式调用, 没有则清掉旧的 inner。
-    try {
-      if (innerToSave) fs.writeFileSync(innerFile, JSON.stringify(innerToSave, null, 2) + '\n');
-      else if (fs.existsSync(innerFile)) fs.rmSync(innerFile, { force: true });
-    } catch (e) { logErr(`保存原 statusline 失败(不影响 review): ${e.message}`); }
-    settings.statusLine = { type: 'command', command: `bash '${dest}'` };
-    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    const tmp = settingsPath + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n');
-    fs.renameSync(tmp, settingsPath);
-    log(innerToSave
-      ? `已把你原有的 statusline 包进来(屏幕仍显示它)并顺带写额度快照 → ${settingsPath}; 交互用 Claude 时刷新 5 小时额度`
-      : `已自动配置 Claude statusLine 写额度快照 → ${settingsPath}; 交互用 Claude 时刷新 5 小时额度, hub 即可显示百分比`);
-  } catch (e) { logErr(`自动配置 statusLine 失败(不影响 review): ${e.message}`); }
+    try { fs.rmSync(innerFile, { force: true }); } catch {}
+    try { fs.rmSync(path.join(destDir, 'statusline-quota.sh'), { force: true }); } catch {}
+  } catch (e) { logErr(`清理旧 statusline 配置失败(不影响 review): ${e.message}`); }
 }
 
 
@@ -816,7 +832,9 @@ function startConfigServer() {
   srv.listen(port, '127.0.0.1');
 }
 
-ensureStatuslineInstalled();   // 自动配置额度快照 statusLine(仅当未配过; 幂等)
+cleanupOldStatusline();        // 还原旧版为额度快照改过的 statusLine(现改用 /usage 查额度)
+pollUsage();                   // 立即查一次额度; 之后每 2min 一次(headless, 零 token)
+setInterval(pollUsage, USAGE_POLL_MS).unref();
 startConfigServer();   // 配置页先起(无论是否已配置), 供首次填写 / 后续修改
 if (configReady(cfg)) {
   connect();

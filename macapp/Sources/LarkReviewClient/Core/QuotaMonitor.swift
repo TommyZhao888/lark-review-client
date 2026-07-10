@@ -33,6 +33,14 @@ final class QuotaMonitor {
     /// 命中限额后置; 到 resetAt 自动失效。
     private var reactiveBlock: (reason: String, resetAt: Date)?
 
+    /// `claude -p /usage` 查到的额度缓存(每 2min 由 refreshUsage 刷新)。
+    private var usageFiveHourPct: Int?
+    private var usageFiveHourResetMs: Int?
+    private var usageSevenDayPct: Int?
+    private var usageSevenDayResetMs: Int?
+    private var usageAt: Date = .distantPast
+    private let usageFreshSec: TimeInterval = 360   // 6min 内视为新鲜; 否则拿不到 → 上报无百分比
+
     /// 每次 review 跑完喂入其输出, 命中限额则记下重置时间。
     func noteReviewOutput(_ logText: String) {
         if let hit = detectQuotaHit(logText) {
@@ -41,17 +49,24 @@ final class QuotaMonitor {
         }
     }
 
-    /// 当前额度状态: 反应式优先(未过期), 否则看快照; 默认 ok(未知不拦, 靠反应式兜底)。
-    /// fiveHourPct 尽量带上(有新鲜快照时非空), 供管理页显示 5 小时已用百分比。
+    /// 当前额度状态: 反应式(命中限额)优先; 否则用 /usage 的 5 小时/7 天窗判定 + 带出百分比与恢复时间。
+    /// 默认 ok(拿不到 = 不拦, 交给反应式兜底; 管理页显示 —)。
     func current(config: Config) -> QuotaStatus {
-        let snap = readSnapshotQuota(config: config)
-        let f5 = snap?.fiveHourPct
-        let f5r = snap?.fiveHourResetAtMs
+        let fresh = Date().timeIntervalSince(usageAt) < usageFreshSec
+        let f5 = fresh ? usageFiveHourPct : nil
+        let f5r = fresh ? usageFiveHourResetMs : nil
         if let b = reactiveBlock {
             if Date() >= b.resetAt { reactiveBlock = nil }
             else { return QuotaStatus(ok: false, reason: b.reason, resetAtMs: ms(b.resetAt), fiveHourPct: f5, fiveHourResetAtMs: f5r) }
         }
-        if let s = snap, s.ok == false { return s }
+        if fresh {
+            if let f5, f5 >= config.quotaFiveHourThreshold {
+                return QuotaStatus(ok: false, reason: "five_hour_\(f5)pct", resetAtMs: f5r, fiveHourPct: f5, fiveHourResetAtMs: f5r)
+            }
+            if let d7 = usageSevenDayPct, d7 >= config.quotaSevenDayThreshold {
+                return QuotaStatus(ok: false, reason: "seven_day_\(d7)pct", resetAtMs: usageSevenDayResetMs, fiveHourPct: f5, fiveHourResetAtMs: f5r)
+            }
+        }
         return QuotaStatus(ok: true, fiveHourPct: f5, fiveHourResetAtMs: f5r)
     }
 
@@ -104,52 +119,58 @@ final class QuotaMonitor {
         return target
     }
 
-    // MARK: - 前瞻式快照
+    // MARK: - `claude -p /usage` 查额度(headless, 零 token, 自带重置时间)
 
-    /// 读 statusline 写的 rate_limits 快照。返回 ok:false/ok:true; 无快照/过期/未启用 -> nil。
-    func readSnapshotQuota(config: Config) -> QuotaStatus? {
-        let raw = config.quotaSnapshotPath.trimmingCharacters(in: .whitespaces)
-        if raw.isEmpty { return nil }
-        let path = raw.hasPrefix("~") ? NSHomeDirectory() + String(raw.dropFirst()) : raw
-        guard let data = FileManager.default.contents(atPath: path),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let updStr = obj["updated_at"] as? String, let upd = isoDate(updStr) else { return nil }
-        if Date().timeIntervalSince(upd) * 1000 > Double(config.quotaSnapshotFreshnessMs) { return nil } // 过期不采信
-        func pct(_ w: Any?) -> Int? {
-            guard let d = w as? [String: Any] else { return nil }
-            if let i = d["used_percentage"] as? Int { return i }
-            if let f = d["used_percentage"] as? Double { return Int(f) }
-            return nil
+    /// 跑 `claude -p /usage --output-format json`, 解析 session(5小时)/week 百分比+重置时间, 更新缓存。
+    func refreshUsage(config: Config) async {
+        let r = await ProcessRunner.run(config.claudePath, ["-p", "/usage", "--output-format", "json"])
+        guard r.code == 0 else { LogStore.shared.log("查额度(/usage)退出码 \(r.code)"); return }
+        var text = r.stdout
+        if let data = r.stdout.data(using: .utf8),
+           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let res = obj["result"] as? String { text = res }
+        if !parseUsageText(text) {
+            LogStore.shared.log("查额度(/usage): 未解析出 session/week 百分比(claude 版本过旧?)")
         }
-        func resetMs(_ w: Any?) -> Int? {
-            guard let v = (w as? [String: Any])?["resets_at"] else { return nil }
-            if let f = v as? Double { return Int(f > 1e12 ? f : f * 1000) }
-            if let i = v as? Int { return i > 1_000_000_000_000 ? i : i * 1000 }
-            if let s = v as? String, let d = isoDate(s) { return Int(d.timeIntervalSince1970 * 1000) }
-            return nil
+    }
+
+    /// 解析 /usage 文本: "Current session: N% used · resets ..."(5小时窗)/ "Current week (all models): M% used · resets ..."。
+    @discardableResult
+    private func parseUsageText(_ text: String) -> Bool {
+        var got = false
+        if let g = firstMatch(#"Current session:\s*(\d+)%\s*used(?:[^\n]*?\bresets\s*([^\n(]+))?"#, text),
+           let p = g[1].flatMap({ Int($0) }) {
+            usageFiveHourPct = p; usageFiveHourResetMs = parseUsageReset(g[2] ?? ""); got = true
         }
-        let f5pct = pct(obj["five_hour"])          // 始终带出(与 ok 无关), 供管理页显示 5 小时已用%
-        let f5reset = resetMs(obj["five_hour"])    // 5 小时窗恢复时间, 始终带出供派活参考
-        if let f5 = f5pct, f5 >= config.quotaFiveHourThreshold {
-            return QuotaStatus(ok: false, reason: "five_hour_\(f5)pct", resetAtMs: f5reset, fiveHourPct: f5, fiveHourResetAtMs: f5reset)
+        if let g = firstMatch(#"Current week \(all models\):\s*(\d+)%\s*used(?:[^\n]*?\bresets\s*([^\n(]+))?"#, text),
+           let p = g[1].flatMap({ Int($0) }) {
+            usageSevenDayPct = p; usageSevenDayResetMs = parseUsageReset(g[2] ?? ""); got = true
         }
-        if let d7 = pct(obj["seven_day"]), d7 >= config.quotaSevenDayThreshold {
-            return QuotaStatus(ok: false, reason: "seven_day_\(d7)pct", resetAtMs: resetMs(obj["seven_day"]), fiveHourPct: f5pct, fiveHourResetAtMs: f5reset)
-        }
-        return QuotaStatus(ok: true, fiveHourPct: f5pct, fiveHourResetAtMs: f5reset)
+        if got { usageAt = Date() }
+        return got
+    }
+
+    /// 把 "Jul 10 at 3pm"(本机时区, 与 /usage 显示时区一致)解析成 epoch ms。
+    private func parseUsageReset(_ s: String) -> Int? {
+        guard let g = firstMatch(#"([A-Za-z]{3,})\s+(\d{1,2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?"#, s),
+              let monName = g[1], let day = g[2].flatMap({ Int($0) }), let h0 = g[3].flatMap({ Int($0) }) else { return nil }
+        let months = ["jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12]
+        guard let mon = months[String(monName.prefix(3)).lowercased()] else { return nil }
+        var hh = h0; let mm = g[4].flatMap { Int($0) } ?? 0; let ap = (g[5] ?? "").lowercased()
+        if ap == "pm" && hh < 12 { hh += 12 }
+        if ap == "am" && hh == 12 { hh = 0 }
+        let cal = Calendar.current; let now = Date()
+        var comps = DateComponents()
+        comps.year = cal.component(.year, from: now); comps.month = mon; comps.day = day
+        comps.hour = hh; comps.minute = mm; comps.second = 0
+        guard var d = cal.date(from: comps) else { return nil }
+        if d.timeIntervalSince(now) < -3 * 24 * 3600 { comps.year! += 1; d = cal.date(from: comps) ?? d }  // 跨年
+        return Int(d.timeIntervalSince1970 * 1000)
     }
 
     // MARK: - helpers
 
     private func ms(_ d: Date) -> Int { Int(d.timeIntervalSince1970 * 1000) }
-
-    private func isoDate(_ s: String) -> Date? {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = f.date(from: s) { return d }
-        f.formatOptions = [.withInternetDateTime]
-        return f.date(from: s)
-    }
 
     /// 返回第一处匹配的各捕获组(组 0 = 整体)。大小写不敏感。无匹配 -> nil。
     private func firstMatch(_ pattern: String, _ text: String) -> [String?]? {
