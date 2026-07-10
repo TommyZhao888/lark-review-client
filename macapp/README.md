@@ -21,10 +21,13 @@ Node 版 `lark-review-client.js` 的原生 mac 重写：把「后台 Node 进程
 
 ```bash
 brew tap tommyzhao888/lark-review-client https://github.com/TommyZhao888/lark-review-client.git
+brew trust tommyzhao888/lark-review-client   # 首次: 授信第三方 tap(新版 Homebrew 要求)
 brew install --cask lark-review-client
 ```
 
-装完直接打开（cask 已自动剥离 quarantine）。也可从 Releases 手动下 dmg 安装（首次打开前需
+装完直接打开（cask 已自动剥离 quarantine）。`brew trust` 是首次必做——新版 Homebrew 默认要求先授信
+第三方 tap，跳过会报 `Refusing to load cask … from untrusted tap`（旧版无此命令可忽略这行）。
+也可从 Releases 手动下 dmg 安装（首次打开前需
 `xattr -dr com.apple.quarantine /Applications/LarkReviewClient.app`）。
 
 ## 更新（自更新）
