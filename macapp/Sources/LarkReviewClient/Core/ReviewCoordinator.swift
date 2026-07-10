@@ -70,6 +70,8 @@ final class ReviewCoordinator {
         let logText = r.stdout + r.stderr
         let parsed = parseResultLine(logText)
         LogStore.shared.log("claude exited=\(r.code) verdict=\(parsed.verdict.isEmpty ? "-" : parsed.verdict) inline=\(parsed.inlineCount)")
+        // 反应式额度检测: 本次 review 若命中限额, 记下重置时间, 之后上报"额度不足", 服务端停派+换人。
+        QuotaMonitor.shared.noteReviewOutput(logText)
 
         let result = ReviewResult(
             exitCode: Int(r.code),
@@ -77,7 +79,8 @@ final class ReviewCoordinator {
             resultLine: parsed.resultLine,
             verdict: parsed.verdict,
             generalCommentUrl: parsed.generalCommentUrl,
-            inlineCount: parsed.inlineCount
+            inlineCount: parsed.inlineCount,
+            quota: QuotaMonitor.shared.current(config: cfg)   // 让服务端立即知道本机额度状态
         )
         if let saved = LogStore.shared.writeReviewLog(job: job, model: model, exitCode: r.code, result: result, logText: logText) {
             LogStore.shared.log("review 完整日志已存: \(saved)")

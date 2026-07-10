@@ -151,7 +151,8 @@ final class WebSocketClient: NSObject {
                 token: self.config.token,
                 hostname: hostname,
                 repos: Array(self.config.repos.keys),
-                version: CLIENT_VERSION
+                version: CLIENT_VERSION,
+                quota: QuotaMonitor.shared.current(config: self.config)
             ))
         }
         startHeartbeat()
@@ -166,7 +167,7 @@ final class WebSocketClient: NSObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(interval))
                 guard let self, self.epoch == myEpoch, !Task.isCancelled else { return }
-                self.send(.heartbeat)
+                self.send(.heartbeat(quota: QuotaMonitor.shared.current(config: self.config)))
             }
         }
     }

@@ -8,26 +8,27 @@ import Foundation
 // ---------- 出站 ----------
 
 enum OutboundMessage {
-    case register(token: String, hostname: String, repos: [String], version: String)
-    case heartbeat
+    case register(token: String, hostname: String, repos: [String], version: String, quota: QuotaStatus)
+    case heartbeat(quota: QuotaStatus)
     case reviewProgress(jobId: String, stage: String)   // stage: "worktree" | "claude"
     case reviewResult(jobId: String, result: ReviewResult)
     case reconnected(wasBusy: Bool, repo: String, prNum: Int?)   // prNum 无任务时发 ""
 
     var jsonObject: [String: Any] {
         switch self {
-        case let .register(token, hostname, repos, version):
+        case let .register(token, hostname, repos, version, quota):
             return ["type": "register", "token": token, "hostname": hostname,
-                    "repos": repos, "version": version]
-        case .heartbeat:
-            return ["type": "heartbeat"]
+                    "repos": repos, "version": version, "quota": quota.jsonObject]
+        case let .heartbeat(quota):
+            return ["type": "heartbeat", "quota": quota.jsonObject]
         case let .reviewProgress(jobId, stage):
             return ["type": "review_progress", "job_id": jobId, "stage": stage]
         case let .reviewResult(jobId, r):
             return ["type": "review_result", "job_id": jobId,
                     "exit_code": r.exitCode, "log_tail": r.logTail,
                     "result_line": r.resultLine, "verdict": r.verdict,
-                    "general_comment_url": r.generalCommentUrl, "inline_count": r.inlineCount]
+                    "general_comment_url": r.generalCommentUrl, "inline_count": r.inlineCount,
+                    "quota": r.quota.jsonObject]
         case let .reconnected(wasBusy, repo, prNum):
             return ["type": "reconnected", "was_busy": wasBusy, "repo": repo,
                     "pr_num": prNum.map { $0 as Any } ?? ""]
@@ -49,6 +50,8 @@ struct ReviewResult: Equatable {
     var verdict: String = ""
     var generalCommentUrl: String = ""
     var inlineCount: String = "?"
+    /// 本机 Claude 额度状态(随结果上报; 命中限额那次尤其关键)。
+    var quota: QuotaStatus = QuotaStatus()
 }
 
 // ---------- 入站 ----------

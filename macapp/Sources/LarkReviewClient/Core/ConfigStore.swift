@@ -30,6 +30,10 @@ enum ConfigStore {
         if let n = obj["notify"] as? Bool { cfg.notify = n }
         if let s = obj["notifySound"] as? String { cfg.notifySound = s }
         if let a = obj["autoUpdate"] as? Bool { cfg.autoUpdate = a }
+        if let qp = obj["quotaSnapshotPath"] as? String { cfg.quotaSnapshotPath = qp }
+        if let q5 = obj["quotaFiveHourThreshold"] as? Int, q5 > 0 { cfg.quotaFiveHourThreshold = q5 }
+        if let q7 = obj["quotaSevenDayThreshold"] as? Int, q7 > 0 { cfg.quotaSevenDayThreshold = q7 }
+        if let qf = obj["quotaSnapshotFreshnessMs"] as? Int, qf > 0 { cfg.quotaSnapshotFreshnessMs = qf }
         if let repos = obj["repos"] as? [String: Any] {
             for (name, v) in repos {
                 guard let rc = v as? [String: Any] else { continue }
