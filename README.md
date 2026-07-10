@@ -10,24 +10,39 @@
 |---|---|---|
 | 形态 | 后台 Node 进程 + 浏览器配置页 + SwiftBar 插件 三件套 | 一个纯菜单栏常驻 app（SwiftUI）|
 | 协议/行为 | —— | 与 Node 版**逐字段对等**，配置/日志路径复用，可随时来回切 |
-| 安装 | `npm install` + `run-client.sh`（见下文）| 本机**编译** `.app`（见下）|
+| 安装 | `npm install` + `run-client.sh`（见下文）| **Homebrew Cask**（见下）|
 
-> 同一时间只跑一个。macOS 用户**最省事**是下载现成 App（下节）；想跟源码/用菜单栏自更新就 clone 后编译；不想碰 Mac App 就用 Node 版。
+> 同一时间只跑一个。macOS 用户**最省事**是 Homebrew 安装（下节）；不想碰 Mac App 就用 Node 版。
 
-## 下载安装 Mac App（免编译，推荐大多数人）
+## 安装 Mac App（Homebrew，推荐）
 
-每次发版由 GitHub Actions 自动编译并发到 **[Releases](https://github.com/TommyZhao888/lark-review-client/releases)**：
+```bash
+brew tap tommyzhao888/lark-review-client https://github.com/TommyZhao888/lark-review-client.git
+brew install --cask lark-review-client
+```
 
-1. 在 Releases 下载最新的 `LarkReviewClient-vX.Y.Z.dmg`。
-2. 双击挂载 → 把 **LarkReviewClient** 拖进 **Applications**。
-3. **首次打开**（仅一次）：在「应用程序」里**右键 App → 打开**（ad-hoc 签名未公证，Gatekeeper 会拦一次）；
-   或先跑 `xattr -dr com.apple.quarantine /Applications/LarkReviewClient.app` 再双击。
-4. 菜单栏点 🦁 → 设置… → 填 `serverUrl` 和管理员发的 `token` → 在「项目」tab 从服务端清单添加 repo 并填本机路径。
+装完直接从「应用程序」打开（cask 已自动处理 quarantine，无需右键打开 / 无需 xattr）。
+要求 macOS 14+、Apple Silicon。首次使用：菜单栏点 🦁 → 设置… → 填 `serverUrl` 和管理员发的
+`token` → 在「项目」tab 从服务端清单添加 repo 并填本机路径。
 
-> 下载安装的版本**不带源码式自更新**（它不是 git 仓库）；有新版本时按同样步骤下载新 dmg 覆盖即可。
-> 想要菜单栏「更新并重启」一键自更新，用下面的 **clone + 编译** 方式安装。
+**升级**：app 自带自更新——有新版本时菜单栏显示 🆙，点 **「更新并重启」** 自动从
+[Releases](https://github.com/TommyZhao888/lark-review-client/releases) 下载新版原地替换并重启；
+设置里可开 **「空闲时自动更新」**。任意安装位置均可用，无需碰 brew。
+（brew 侧对齐版本号用 `brew upgrade --cask --greedy-auto-updates lark-review-client`；
+app 自更新后 `brew list --cask --versions` 显示滞后属正常，不影响使用。）
 
-## 编译 Mac App（macapp）
+**卸载**：`brew uninstall --cask lark-review-client`（保留配置）；
+连 `~/.lark-review-client.json` 等一起删用 `brew uninstall --zap --cask lark-review-client`。
+
+**手动安装（备选）**：在 Releases 下载 `LarkReviewClient-vX.Y.Z.dmg` → 挂载 → 拖进 Applications →
+首次打开前 `xattr -dr com.apple.quarantine /Applications/LarkReviewClient.app`（ad-hoc 签名未公证）。
+装好后同样可用菜单栏自更新。
+
+**从旧安装方式迁移**（配置 `~/.lark-review-client.json` 全程保留）：
+- 手动 dmg 安装过：退出 app → `rm -rf /Applications/LarkReviewClient.app`（brew 发现目标已存在会拒装）→ 按上面命令安装。
+- git clone 源码跑过：旧 app 设置里**先关「开机自启」**（登录项绑定旧路径）→ 退出 → brew 安装 → 新 app 里重新开自启。
+
+## 编译 Mac App（macapp，开发者）
 
 **要求**：macOS 14+、Xcode 命令行工具（`xcode-select --install`，swift 5.9+）。
 
@@ -35,7 +50,7 @@
 git clone https://github.com/TommyZhao888/lark-review-client.git
 cd lark-review-client/macapp
 
-make test      # 单元测试（协议编解码 / 配置读写 / 模板渲染）
+make test      # 单元测试（协议编解码 / 配置读写 / 模板渲染 / 自更新）
 make bundle    # 编译并组装 build/LarkReviewClient.app（swift build -c release + ad-hoc 签名）
 make run       # bundle 后启动（= open build/LarkReviewClient.app）
 ```
@@ -43,8 +58,8 @@ make run       # bundle 后启动（= open build/LarkReviewClient.app）
 - `make build` 只编译不打包；`make clean` 清理。
 - 首次启动：菜单栏点 🦁 → 设置… → 填 `serverUrl`（`wss://…`）和管理员发的 `token` → 保存并应用
   → 连上后在「项目」tab 从服务端清单添加 repo 并填本机路径。
-- 升级：有新版本时菜单栏显示 🆙，下拉点 **「更新并重启」** 自动 `git pull` + `make bundle` + 重启；
-  或在设置里开「空闲时自动更新」。也可手动 `git pull` + `make bundle` 覆盖 `build/LarkReviewClient.app`。
+- 升级：与 brew 安装一样走菜单栏「更新并重启」（从 Releases 下载新版**原地替换** `build/LarkReviewClient.app`）；
+  开发时想跟本地源码就手动 `git pull` + `make bundle`。
 - 更完整的说明（迁移、本地端到端测试、代码结构）见 **`macapp/README.md`**。
 
 ---

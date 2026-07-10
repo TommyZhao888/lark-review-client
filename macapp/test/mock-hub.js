@@ -8,7 +8,8 @@
 //   close <repo> <pr>          发 pr_closed
 //   repos                      发 repos_updated（清单加一个新 repo）
 //   reject                     发 register_reject (bad_token)
-//   upgrade                    下次 register_ack 携带 upgrade 块（立即断开触发重连即可见）
+//   upgrade [ver]              下次 register_ack 携带 upgrade 块，可选指定 recommended 版本
+//                              （默认 9.9.9；带 ver 参数时强制开启。立即断开触发重连即可见）
 //   kill                       断开当前连接（测重连）
 //   quit                       退出
 
@@ -19,6 +20,7 @@ const wss = new WebSocket.Server({ port: PORT, host: '127.0.0.1' });
 
 let current = null;
 let withUpgrade = false;
+let upgradeVer = '9.9.9';
 let jobSeq = 0;
 
 const MANAGED = [
@@ -56,7 +58,7 @@ wss.on('connection', (ws) => {
         managed_repos: MANAGED,
       };
       if (withUpgrade) {
-        ack.upgrade = { recommended: '9.9.9', min: '1.0.0', below_min: false, message: '测试升级提示（mock）' };
+        ack.upgrade = { recommended: upgradeVer, min: '1.0.0', below_min: false, message: '测试升级提示（mock）' };
       }
       send(ack);
     }
@@ -111,7 +113,12 @@ function handleCommand(line) {
     case 'close': send({ type: 'pr_closed', repo: args[0] || 'mock/alpha', pr_num: Number(args[1] || 1) }); break;
     case 'repos': send({ type: 'repos_updated', managed_repos: [...MANAGED, { repo: 'mock/new-' + Date.now() % 1000 }] }); break;
     case 'reject': send({ type: 'register_reject', reason: 'bad_token' }); break;
-    case 'upgrade': withUpgrade = !withUpgrade; log('upgrade on next ack:', withUpgrade); break;
+    case 'upgrade': {
+      if (args[0]) { upgradeVer = args[0]; withUpgrade = true; }
+      else withUpgrade = !withUpgrade;
+      log('upgrade on next ack:', withUpgrade, withUpgrade ? `(recommended ${upgradeVer})` : '');
+      break;
+    }
     case 'kill': if (current) current.terminate(); break;
     case 'quit': process.exit(0);
     default: if (cmd) log('unknown cmd:', cmd);

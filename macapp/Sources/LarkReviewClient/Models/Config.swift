@@ -1,7 +1,7 @@
 import Foundation
 
 /// 客户端版本：升级功能时手动 +1（与 Info.plist 保持一致）。服务端据此判断是否提示升级。
-let CLIENT_VERSION = "1.5.7"
+let CLIENT_VERSION = "1.6.0"
 
 /// 单个 repo 的本机配置（~/.lark-review-client.json 的 repos["owner/repo"]）。
 struct RepoConfig: Codable, Equatable {
@@ -23,7 +23,7 @@ struct Config: Equatable {
     var worktreeMaxAgeDays: Int = 14
     var notify: Bool = true
     var notifySound: String = ""
-    /// 空闲(无在跑/排队 review)且连上时, 检测到新版本自动更新(git pull + make bundle + 重启)。默认关。
+    /// 空闲(无在跑/排队 review)且连上时, 检测到新版本自动更新(下载 Releases dmg 原地替换 + 重启)。默认关。
     var autoUpdate: Bool = false
 
     // ---- Claude 额度(quota)相关 ----
