@@ -8,6 +8,12 @@
   "worktreeMaxAgeDays": 14,
   "configPort": 8790,
 
+  "_note_quota": "额度感知(可选前瞻式): 装 statusline-quota.sh 作为 Claude Code 的 statusLine 后, 填 quotaSnapshotPath 指向它写的快照, 客户端会在 5 小时窗已用 >= quotaFiveHourThreshold(默认90)时上报额度不足, 服务端就不再派 review 给你、自动换在线且有额度的人。留空 quotaSnapshotPath = 只用反应式(命中限额后才知道)。",
+  "quotaSnapshotPath": "",
+  "quotaFiveHourThreshold": 90,
+  "quotaSevenDayThreshold": 95,
+  "quotaSnapshotFreshnessMs": 900000,
+
   "repos": {
     "Liontech-tw/lion-trip-app-global": {
       "mainRepo": "/Users/you/Source/lion-trip-app-global",

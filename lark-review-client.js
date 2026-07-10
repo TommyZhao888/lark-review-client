@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.4.4';
+const CLIENT_VERSION = '1.5.0';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -60,6 +60,14 @@ function loadConfig() {
   cfg.worktreeMaxAgeDays = cfg.worktreeMaxAgeDays || 14;
   cfg.claudePath = cfg.claudePath || 'claude';
   cfg.configPort = cfg.configPort || 8790;   // 本机配置页端口
+  // ---- Claude 额度(quota)相关 ----
+  // 前瞻式: 读一个由 statusline 写的 rate_limits 快照(claude-hud 或本仓库 statusline-quota.sh)。
+  // headless(--print)不触发 statusline, 故快照仅在本机【交互使用 Claude】时刷新; 限额是账号级的,
+  // 交互产生的快照同样反映 headless review 的消耗。快照过期/缺失 → 退回反应式(命中限额才知道)。
+  cfg.quotaSnapshotPath = cfg.quotaSnapshotPath || '';                 // 空=不启用前瞻式(仍有反应式兜底)
+  cfg.quotaFiveHourThreshold = cfg.quotaFiveHourThreshold || 90;       // 5 小时窗已用 >= 此% 视为额度不足
+  cfg.quotaSevenDayThreshold = cfg.quotaSevenDayThreshold || 95;       // 7 天窗已用 >= 此% 视为额度不足
+  cfg.quotaSnapshotFreshnessMs = cfg.quotaSnapshotFreshnessMs || 900000; // 快照超过 15min 未更新视为过期(不采信)
   return cfg;
 }
 
@@ -77,6 +85,89 @@ function fail(msg)    { console.error('[client] FATAL:', msg); process.exit(1); 
 
 let cfg = loadConfig();
 log(`config ${CONFIG_PATH} loaded, repos: ${Object.keys(cfg.repos || {}).join(', ') || '(无)'} (身份由服务端按 token 下发)`);
+
+// ==================== Claude 额度(quota)上报 ====================
+// 目标: 额度用尽/接近用尽的人不再被派 review, 由服务端自动改派并在群里提示。
+//  - 反应式(可靠底座): review 命中限额时 claude 输出里带 "You've hit your ... limit ... resets ...",
+//    解析出重置时间 → 在此之前该 client 上报"额度不足", 服务端据此停派+换人+提示。
+//  - 前瞻式(可选增强): 读 statusline 写的 rate_limits 快照, 5 小时/7 天窗已用 >= 阈值就提前上报,
+//    连派单前就避开。快照过期/缺失则仅靠反应式。
+// currentQuota() 汇总两者交给服务端; reset 到点自动恢复可用。
+
+let reactiveQuotaBlock = null;   // {reason, reset_at(ms)} —— 命中限额后置; 到 reset_at 自动失效
+
+// 从 claude 输出解析限额命中。命中→{reason, reset_at}; 未命中→null。
+// 文案形如: "You've hit your session limit · resets 3:45pm" / "...weekly limit · resets Mon 12:00am"
+//           "...Opus limit · resets ..."; API key: "Credit balance is too low" / "(429)"。
+function detectQuotaHit(logText) {
+  if (!logText) return null;
+  const m = logText.match(/hit your\s+(\S+)\s+limit\b[^\n]*?\bresets?\s+([^\n.·]+)/i);
+  if (m) {
+    const kind = m[1].toLowerCase();               // session / weekly / opus / 5-hour...
+    const resetText = m[2].trim();
+    return { reason: `${kind}_limit`, reset_at: parseResetToEpoch(resetText, kind), reset_text: resetText };
+  }
+  if (/credit balance is too low/i.test(logText)) {
+    return { reason: 'credit_low', reset_at: Date.now() + 6 * 3600_000, reset_text: '' }; // 无重置时间, 保守冷却 6h
+  }
+  return null;
+}
+
+// 把 claude 的重置文案(本机时区)解析成 epoch ms。解析不出用按类型的保守兜底冷却。
+//   "3:45pm" → 今天/明天该时刻的下一次; "Mon 12:00am" → 下一个该星期几该时刻。
+function parseResetToEpoch(text, kind) {
+  const fallback = () => Date.now() + (/(week|7|seven|opus)/i.test(kind || '') ? 24 : 5) * 3600_000;
+  if (!text) return fallback();
+  const now = new Date();
+  const tm = text.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!tm) return fallback();
+  let hh = parseInt(tm[1], 10); const mm = tm[2] ? parseInt(tm[2], 10) : 0;
+  const ap = (tm[3] || '').toLowerCase();
+  if (ap === 'pm' && hh < 12) hh += 12;
+  if (ap === 'am' && hh === 12) hh = 0;
+  const wdMatch = text.match(/\b(sun|mon|tue|wed|thu|fri|sat)/i);
+  const target = new Date(now);
+  target.setHours(hh, mm, 0, 0);
+  if (wdMatch) {
+    const wds = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+    const want = wds.indexOf(wdMatch[1].toLowerCase());
+    let add = (want - target.getDay() + 7) % 7;
+    if (add === 0 && target.getTime() <= now.getTime()) add = 7;
+    target.setDate(target.getDate() + add);
+  } else if (target.getTime() <= now.getTime()) {
+    target.setDate(target.getDate() + 1);   // 该时刻今天已过 → 明天(session 类通常在 5h 内, 仍是保守上界)
+  }
+  const epoch = target.getTime();
+  return Number.isFinite(epoch) ? epoch : fallback();
+}
+
+// 读 statusline 写的 rate_limits 快照(前瞻式)。返回 {ok:false,...} / {ok:true} / null(无快照/过期/未启用)。
+function readSnapshotQuota() {
+  const p = cfg.quotaSnapshotPath;
+  if (!p) return null;
+  let snap;
+  try { snap = JSON.parse(fs.readFileSync(p.replace(/^~/, os.homedir()), 'utf8')); }
+  catch { return null; }
+  const upd = Date.parse(snap.updated_at || '');
+  if (!Number.isFinite(upd) || Date.now() - upd > cfg.quotaSnapshotFreshnessMs) return null; // 过期不采信
+  const pct = (w) => (w && typeof w.used_percentage === 'number') ? w.used_percentage : null;
+  const resetMs = (w) => { const v = w && w.resets_at; if (v == null) return null; const n = typeof v === 'number' ? (v > 1e12 ? v : v * 1000) : Date.parse(v); return Number.isFinite(n) ? n : null; };
+  const f5 = pct(snap.five_hour), d7 = pct(snap.seven_day);
+  if (f5 != null && f5 >= cfg.quotaFiveHourThreshold) return { ok: false, reason: `five_hour_${f5}pct`, reset_at: resetMs(snap.five_hour) };
+  if (d7 != null && d7 >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${d7}pct`, reset_at: resetMs(snap.seven_day) };
+  return { ok: true };
+}
+
+// 汇总当前额度状态给服务端: 反应式优先(未过期), 否则看快照。默认 ok(未知不拦, 交给反应式兜底)。
+function currentQuota() {
+  if (reactiveQuotaBlock) {
+    if (reactiveQuotaBlock.reset_at && Date.now() >= reactiveQuotaBlock.reset_at) reactiveQuotaBlock = null;
+    else return { ok: false, reason: reactiveQuotaBlock.reason, reset_at: reactiveQuotaBlock.reset_at || null };
+  }
+  const snap = readSnapshotQuota();
+  if (snap && snap.ok === false) return { ok: false, reason: snap.reason, reset_at: snap.reset_at || null };
+  return { ok: true, reason: null, reset_at: null };
+}
 
 // ---------- Mac 通知栏提醒(收到/执行中/完成/断连/重连); 非 macOS 或 cfg.notify=false 时跳过 ----------
 function notify(title, message) {
@@ -289,11 +380,18 @@ async function runReviewJob(job) {
   const logText = (r.stdout || '') + (r.stderr || '');
   const parsed = parseResult(logText);
   log(`claude exited=${r.code} verdict=${parsed.verdict || '-'} inline=${parsed.inline_count}`);
+  // 反应式额度检测: 本次 review 若命中限额, 记下重置时间, 之后上报"额度不足", 服务端停派+换人。
+  const qhit = detectQuotaHit(logText);
+  if (qhit) {
+    reactiveQuotaBlock = { reason: qhit.reason, reset_at: qhit.reset_at };
+    log(`⚠️ 命中 Claude 限额(${qhit.reason}), 预计 ${qhit.reset_at ? new Date(qhit.reset_at).toLocaleString() : '?'} 恢复; 本机将上报额度不足`);
+  }
   const savedLog = writeReviewLog(job, r.code, parsed, logText);
   if (savedLog) log(`review 完整日志已存: ${savedLog}`);
   return {
     exit_code: r.code,
     log_tail: logText.slice(-8000),
+    quota: currentQuota(),        // 让服务端立即知道本机额度状态(命中限额那次尤其关键)
     ...parsed,
   };
 }
@@ -351,9 +449,11 @@ function connect() {
       hostname: detectHostname(),
       repos: Object.keys(cfg.repos),
       version: CLIENT_VERSION,
+      quota: currentQuota(),
     });
     if (hbTimer) clearInterval(hbTimer);
-    hbTimer = setInterval(() => send({ type: 'heartbeat' }), cfg.heartbeatMs);
+    // 心跳带上额度状态: 服务端据此实时判定该 client 可否派单(额度不足=当作不可派, 换人)。
+    hbTimer = setInterval(() => send({ type: 'heartbeat', quota: currentQuota() }), cfg.heartbeatMs);
   });
 
   ws.on('message', (data) => {
