@@ -45,7 +45,19 @@ if [[ "$HAS_RL" == "1" ]]; then
   }' > "$TMP" 2>/dev/null && mv "$TMP" "$SNAP_PATH" 2>/dev/null || rm -f "$TMP" 2>/dev/null || true
 fi
 
-# 输出一行给 Claude Code 当状态栏(有额度就显示 5h/7d 已用%)。
+# ---- 状态栏输出 ----
+# 若客户端把你【原有的】statusline 包了进来(inner-statusline.json), 就把 stdin 原样喂给它、
+# 显示它的输出(你屏幕上看到的还是你原来那条 statusline); 否则打印我们自己的简单一行。
+# 这样"写额度快照"与"你原有 statusline"共存, 不抢占你的显示。
+INNER_FILE="$HOME/.lark-review-client/inner-statusline.json"
+INNER=""
+if [ -f "$INNER_FILE" ] && command -v jq >/dev/null 2>&1; then
+  INNER=$(jq -r '.command // empty' "$INNER_FILE" 2>/dev/null)
+fi
+if [ -n "$INNER" ]; then
+  OUT=$(printf '%s' "$IN" | eval "$INNER" 2>/dev/null) && [ -n "$OUT" ] && { printf '%s' "$OUT"; exit 0; }
+  # 原 statusline 失败/空 → 落到下面打印我们自己的兜底行, 不让状态栏空白。
+fi
 printf '%s' "$IN" | jq -r '
   (.model.display_name // "claude") as $m |
   (.rate_limits.five_hour.used_percentage) as $f |

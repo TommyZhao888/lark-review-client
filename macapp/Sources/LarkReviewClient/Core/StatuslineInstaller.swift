@@ -28,20 +28,31 @@ enum StatuslineInstaller {
             settings = obj
         }
         let snapAbs = expand(config.quotaSnapshotPath)
+        let innerFile = dir + "/inner-statusline.json"
+        var innerToSave: [String: Any]? = nil
         if let sl = settings["statusLine"] as? [String: Any], let cmd = sl["command"] as? String {
-            if cmd.contains("statusline-quota.sh") { return }                                   // 已是我们的 → 幂等
-            if cmd.range(of: "claude-hud", options: .caseInsensitive) != nil, !snapAbs.isEmpty { // claude-hud → 桥接
+            if cmd.contains("statusline-quota.sh") { return }                                   // 已是我们的(可能已包装)→ 幂等
+            if cmd.range(of: "claude-hud", options: .caseInsensitive) != nil, !snapAbs.isEmpty { // claude-hud → 桥接(更轻)
                 bridgeClaudeHud(snapAbs); return
             }
-            LogStore.shared.log("检测到你已配置 Claude statusLine(非 claude-hud), 不覆盖。如需 hub 显示额度百分比, 把额度快照写入合并进你的 statusline, 或设 autoStatusline=false 静默。")
-            return
+            // 其它自定义 statusline → 包装: 记下原命令, 我们的脚本每次先写快照再链式调用它显示其输出(共存)。
+            innerToSave = ["type": (sl["type"] as? String) ?? "command", "command": cmd]
+        }
+        if let inner = innerToSave {
+            if let d = try? JSONSerialization.data(withJSONObject: inner, options: [.prettyPrinted]) {
+                try? d.write(to: URL(fileURLWithPath: innerFile), options: .atomic)
+            }
+        } else {
+            try? fm.removeItem(atPath: innerFile)   // 之前包过、现在没原 statusline 了 → 清理
         }
         settings["statusLine"] = ["type": "command", "command": "bash '\(scriptPath)'"]
         do {
             try fm.createDirectory(atPath: home + "/.claude", withIntermediateDirectories: true)
             let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: URL(fileURLWithPath: settingsPath), options: .atomic)
-            LogStore.shared.log("已自动配置 Claude statusLine 写额度快照 → \(settingsPath); 交互用 Claude 时刷新 5 小时额度, hub 即可显示百分比")
+            LogStore.shared.log(innerToSave != nil
+                ? "已把你原有的 statusline 包进来(屏幕仍显示它)并顺带写额度快照 → \(settingsPath)"
+                : "已自动配置 Claude statusLine 写额度快照 → \(settingsPath); 交互用 Claude 时刷新 5 小时额度, hub 即可显示百分比")
         } catch {
             LogStore.shared.log("自动配置 statusLine 失败(不影响 review): \(error.localizedDescription)")
         }
@@ -96,6 +107,13 @@ enum StatuslineInstaller {
       mkdir -p "$(dirname "$SNAP")" 2>/dev/null || true
       T="$SNAP.$$.tmp"
       printf '%s' "$IN" | jq -c '{updated_at:(now|todate),five_hour:{used_percentage:(.rate_limits.five_hour.used_percentage//null),resets_at:(.rate_limits.five_hour.resets_at//null)},seven_day:{used_percentage:(.rate_limits.seven_day.used_percentage//null),resets_at:(.rate_limits.seven_day.resets_at//null)}}' > "$T" 2>/dev/null && mv "$T" "$SNAP" 2>/dev/null || rm -f "$T" 2>/dev/null || true
+    fi
+    # 若客户端把你原有的 statusline 包了进来, 就把 stdin 喂给它、显示它的输出(共存, 不抢占你的显示)。
+    INNER_FILE="$HOME/.lark-review-client/inner-statusline.json"
+    INNER=""
+    [ -f "$INNER_FILE" ] && INNER=$(jq -r '.command // empty' "$INNER_FILE" 2>/dev/null)
+    if [ -n "$INNER" ]; then
+      OUT=$(printf '%s' "$IN" | eval "$INNER" 2>/dev/null) && [ -n "$OUT" ] && { printf '%s' "$OUT"; exit 0; }
     fi
     printf '%s' "$IN" | jq -r '(.model.display_name//"claude") as $m|(.rate_limits.five_hour.used_percentage) as $f|(.rate_limits.seven_day.used_percentage) as $d|if $f!=null then "\($m) | 5h \($f)% | 7d \($d//0)%" else $m end' 2>/dev/null || echo claude
     """#

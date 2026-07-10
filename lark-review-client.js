@@ -197,20 +197,29 @@ function ensureStatuslineInstalled() {
     try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch { settings = {}; }
     if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
     const snapAbs = String(cfg.quotaSnapshotPath || '').replace(/^~/, os.homedir());
+    const innerFile = path.join(destDir, 'inner-statusline.json');
     const existing = settings.statusLine;
+    let innerToSave = null;
     if (existing && existing.command) {
       const cmd = String(existing.command);
-      if (cmd.includes('statusline-quota.sh')) return;                       // 已是我们的 → 幂等
-      if (/claude-hud/i.test(cmd) && snapAbs) { bridgeClaudeHud(snapAbs); return; }  // claude-hud → 桥接让它写快照(不动 statusLine)
-      log('检测到你已配置 Claude statusLine(非 claude-hud), 不覆盖。如需 hub 显示 5 小时额度百分比, 把额度快照写入合并进你的 statusline, 或设 autoStatusline:false 静默本提示。');
-      return;   // 未知的第三方 statusline → 尊重不动
+      if (cmd.includes('statusline-quota.sh')) return;                       // 已是我们的(可能已包装)→ 幂等
+      if (/claude-hud/i.test(cmd) && snapAbs) { bridgeClaudeHud(snapAbs); return; }  // claude-hud → 桥接(更轻, 不动 statusLine)
+      // 其它自定义 statusline → 包装: 记下原命令, 我们的脚本每次先写快照再链式调用它并显示其输出(共存)。
+      innerToSave = { type: existing.type || 'command', command: cmd };
     }
+    // 安装我们的脚本为 statusLine; 有原 statusline 就存起来供链式调用, 没有则清掉旧的 inner。
+    try {
+      if (innerToSave) fs.writeFileSync(innerFile, JSON.stringify(innerToSave, null, 2) + '\n');
+      else if (fs.existsSync(innerFile)) fs.rmSync(innerFile, { force: true });
+    } catch (e) { logErr(`保存原 statusline 失败(不影响 review): ${e.message}`); }
     settings.statusLine = { type: 'command', command: `bash '${dest}'` };
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
     const tmp = settingsPath + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n');
     fs.renameSync(tmp, settingsPath);
-    log(`已自动配置 Claude statusLine 写额度快照 → ${settingsPath}; 你交互使用 Claude 时会刷新 5 小时额度, hub 即可显示百分比`);
+    log(innerToSave
+      ? `已把你原有的 statusline 包进来(屏幕仍显示它)并顺带写额度快照 → ${settingsPath}; 交互用 Claude 时刷新 5 小时额度`
+      : `已自动配置 Claude statusLine 写额度快照 → ${settingsPath}; 交互用 Claude 时刷新 5 小时额度, hub 即可显示百分比`);
   } catch (e) { logErr(`自动配置 statusLine 失败(不影响 review): ${e.message}`); }
 }
 
