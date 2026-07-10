@@ -6,9 +6,12 @@ GitHub 账号提交 review; 你不在线时则照常 @ 你人工催办。
 
 > 字段详解、Azure DevOps 额外配置、菜单栏图标含义见 **README.md**。
 
-> **macOS 用户**：也可以用原生菜单栏 App（免开浏览器配置页 / 免 SwiftBar）。编译运行：
-> `cd lark-review-client/macapp && make bundle && make run`（要求 macOS 14+、Xcode 命令行工具）。
-> 详见 README「编译 Mac App」一节与 `macapp/README.md`。下面是 Node 版的快速开始。
+> **macOS 用户**：推荐用原生菜单栏 App（免开浏览器配置页 / 免 SwiftBar / 自带自更新），Homebrew 安装：
+> ```bash
+> brew tap tommyzhao888/lark-review-client https://github.com/TommyZhao888/lark-review-client.git
+> brew install --cask lark-review-client
+> ```
+> 要求 macOS 14+、Apple Silicon。详见 README「安装 Mac App」一节与 `macapp/README.md`。下面是 Node 版的快速开始。
 
 ## 0. 前置(本机先装好并登录)
 - Node.js 18+

@@ -1,7 +1,8 @@
 name: Release Mac App (DMG)
 
 # 打 vX.Y.Z tag 时自动在 macOS runner 上编译 mac app、打成 .dmg 并发到 GitHub Release,
-# 成员免装 Xcode / 免编译直接下载。也可手动为已存在的 tag 补建 Release。
+# 然后自动 bump 本仓库的 Homebrew cask(Casks/lark-review-client.rb)。
+# 成员免装 Xcode / 免编译: brew 装, app 自更新升级。也可手动为已存在的 tag 补建 Release。
 # 公开仓库的 GitHub Actions(含 macOS runner)免费不限量。
 
 on:
@@ -14,11 +15,14 @@ on:
         required: true
 
 permissions:
-  contents: write   # 创建 Release / 上传附件需要
+  contents: write   # 创建 Release / 上传附件 / bump cask 推 main 需要
 
 jobs:
   build-dmg:
     runs-on: macos-15   # Apple Silicon runner, 默认 Xcode 较新
+    outputs:
+      tag: ${{ steps.tag.outputs.name }}
+      dmg_sha256: ${{ steps.checksum.outputs.sha256 }}
     steps:
       - name: 确定 tag
         id: tag
@@ -50,6 +54,11 @@ jobs:
             -ov -format UDZO "LarkReviewClient-${{ steps.tag.outputs.name }}.dmg"
           ls -lh "LarkReviewClient-${{ steps.tag.outputs.name }}.dmg"
 
+      # sha256 在打包机上算(与上传的是同一文件), 经 job outputs 传给 bump-cask。
+      - name: 计算 DMG sha256
+        id: checksum
+        run: echo "sha256=$(shasum -a 256 "LarkReviewClient-${{ steps.tag.outputs.name }}.dmg" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
       - name: 发 Release + 上传 DMG
         env:
           GH_TOKEN: ${{ github.token }}
@@ -57,13 +66,72 @@ jobs:
         run: |
           NOTES="LarkReviewClient $TAG — 原生 Mac App(免编译)。
 
-          安装: 下载 .dmg → 双击挂载 → 把 App 拖进 Applications。
-          首次打开(仅一次): 右键 App → 打开(ad-hoc 签名未公证); 或先跑
-          \`xattr -dr com.apple.quarantine /Applications/LarkReviewClient.app\`。
-          用 git clone 装的成员可继续用菜单栏「更新并重启」自更新。"
+          安装(推荐 Homebrew, 一次性):
+          \`\`\`
+          brew tap tommyzhao888/lark-review-client https://github.com/TommyZhao888/lark-review-client.git
+          brew install --cask lark-review-client
+          \`\`\`
+          装完直接打开(cask 已自动处理 quarantine)。
+
+          升级: app 菜单栏自更新(检测到新版本一键「更新并重启」, 或设置里开「空闲时自动更新」);
+          也可 \`brew upgrade --cask --greedy-auto-updates lark-review-client\`。
+
+          手动安装(备选): 下载 .dmg → 挂载 → 拖进 Applications → 首次打开前
+          \`xattr -dr com.apple.quarantine /Applications/LarkReviewClient.app\`(ad-hoc 签名未公证)。"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "LarkReviewClient-$TAG.dmg" --clobber
           else
             gh release create "$TAG" "LarkReviewClient-$TAG.dmg" \
               --title "LarkReviewClient $TAG" --notes "$NOTES"
           fi
+
+  # Release 就绪后, 把 main 上的 cask bump 到新版本(version + sha256 两行, 其余 stanza 人工维护)。
+  # 不会循环触发: 触发器 tags-only + GITHUB_TOKEN 推送不触发 workflow + [skip ci] 三重保险。
+  bump-cask:
+    needs: build-dmg
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: cask-bump          # 连发多个 tag 时串行 bump, 配合降级守卫保证终态正确
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: 更新 Casks/lark-review-client.rb (version + sha256)
+        env:
+          TAG: ${{ needs.build-dmg.outputs.tag }}
+          SHA256: ${{ needs.build-dmg.outputs.dmg_sha256 }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          CASK="Casks/lark-review-client.rb"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          for attempt in 1 2 3; do
+            git fetch origin main
+            git reset --hard origin/main
+
+            CURRENT="$(sed -n 's/^  version "\(.*\)"$/\1/p' "$CASK")"
+            # 防降级: workflow_dispatch 给旧 tag 补 Release 时不回退 cask
+            if [ "$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
+              echo "cask 当前 $CURRENT 高于目标 $VERSION, 跳过 bump"; exit 0
+            fi
+
+            sed -i -E "s|^  version \".*\"$|  version \"${VERSION}\"|" "$CASK"
+            sed -i -E "s|^  sha256 \".*\"$|  sha256 \"${SHA256}\"|"   "$CASK"
+            grep -q "^  version \"${VERSION}\"$" "$CASK"
+            grep -q "^  sha256 \"${SHA256}\"$"   "$CASK"
+
+            if git diff --quiet; then
+              echo "cask 已是 ${VERSION} 且 sha 一致(幂等), 跳过"; exit 0
+            fi
+            git commit -am "chore(cask): bump lark-review-client to ${TAG} [skip ci]"
+            if git push origin main; then exit 0; fi
+            echo "push 被拒(main 刚有新提交), 第 ${attempt} 次重试"
+          done
+          echo "::error::cask bump 连续 3 次 push 失败, 请手动补: 改 ${CASK} 的 version/sha256 后推 main"
+          exit 1

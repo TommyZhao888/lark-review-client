@@ -11,19 +11,34 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testRegisterMessage() throws {
-        let obj = try jsonObject(.register(token: "tk", hostname: "my-mac", repos: ["a/b", "c/d"], version: "2.0.0"))
+        let obj = try jsonObject(.register(token: "tk", hostname: "my-mac", repos: ["a/b", "c/d"],
+                                           version: "2.0.0", quota: QuotaStatus()))
         XCTAssertEqual(obj["type"] as? String, "register")
         XCTAssertEqual(obj["token"] as? String, "tk")
         XCTAssertEqual(obj["hostname"] as? String, "my-mac")
         XCTAssertEqual(obj["repos"] as? [String], ["a/b", "c/d"])
         XCTAssertEqual(obj["version"] as? String, "2.0.0")
+        XCTAssertEqual((obj["quota"] as? [String: Any])?["ok"] as? Bool, true)
         XCTAssertNil(obj["open_id"], "绝不上报 open_id（防冒名，身份归服务端）")
         XCTAssertNil(obj["name"])
     }
 
     func testHeartbeat() throws {
-        let obj = try jsonObject(.heartbeat)
-        XCTAssertEqual(obj as? [String: String], ["type": "heartbeat"])
+        let obj = try jsonObject(.heartbeat(quota: QuotaStatus()))
+        XCTAssertEqual(obj["type"] as? String, "heartbeat")
+        XCTAssertEqual((obj["quota"] as? [String: Any])?["ok"] as? Bool, true)
+    }
+
+    func testHeartbeatQuotaExhausted() throws {
+        let q = QuotaStatus(ok: false, reason: "5h window 92%", resetAtMs: 1_700_000_000_000,
+                            fiveHourPct: 92, fiveHourResetAtMs: 1_700_000_000_000)
+        let obj = try jsonObject(.heartbeat(quota: q))
+        let quota = obj["quota"] as? [String: Any]
+        XCTAssertEqual(quota?["ok"] as? Bool, false)
+        XCTAssertEqual(quota?["reason"] as? String, "5h window 92%")
+        XCTAssertEqual(quota?["reset_at"] as? Int, 1_700_000_000_000)
+        XCTAssertEqual(quota?["five_hour_pct"] as? Int, 92)
+        XCTAssertEqual(quota?["five_hour_reset_at"] as? Int, 1_700_000_000_000)
     }
 
     func testReviewProgress() throws {

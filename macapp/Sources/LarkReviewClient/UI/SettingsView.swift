@@ -81,7 +81,7 @@ struct SettingsView: View {
             }
             Section("更新") {
                 Toggle("空闲时自动更新", isOn: $draft.autoUpdate)
-                Text("连上服务端、且当前无 review 在跑/排队时，检测到新版本自动 git pull + 重新编译 + 重启。关闭则仅提示，手动在菜单栏点「更新并重启」。仅对 git clone 源码安装生效；下载(dmg)安装的版本请到 Releases 下新包（菜单栏会显示「前往下载新版」）。")
+                Text("连上服务端、且当前无 review 在跑/排队时，检测到新版本自动从 GitHub Releases 下载新版并原地替换 + 重启。关闭则仅提示，手动在菜单栏点「更新并重启」。任意安装位置均可用。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 LabeledContent("客户端版本", value: "v\(CLIENT_VERSION)")

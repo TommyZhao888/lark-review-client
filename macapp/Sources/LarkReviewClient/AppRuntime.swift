@@ -107,7 +107,8 @@ final class AppRuntime {
         ws.reconnect(with: state.config)
     }
 
-    /// 自更新：git pull + make bundle + 重启。auto=true 为「空闲时自动更新」触发（不打断在跑/排队的 review）。
+    /// 自更新：从 GitHub Releases 下载目标版本 dmg → 原地替换自己 → 重启（任意安装位置可用）。
+    /// auto=true 为「空闲时自动更新」触发（不打断在跑/排队的 review）。
     func performSelfUpdate(auto: Bool) {
         if case .running = state.updatePhase { return }              // 已在更新中
         if state.runningJob != nil || !state.queuedJobs.isEmpty {
@@ -117,8 +118,9 @@ final class AppRuntime {
         }
         state.updatePhase = .running("准备…")
         LogStore.shared.log("self-update: 开始更新\(auto ? "（自动，检测到新版本且空闲）" : "（手动）")")
+        let target = state.upgrade?.recommended
         Task { [weak self] in
-            let outcome = await SelfUpdater.run(onStep: { step in
+            let outcome = await SelfUpdater.run(targetVersion: target, onStep: { step in
                 Task { @MainActor in self?.state.updatePhase = .running(step) }
             })
             await MainActor.run {
@@ -134,7 +136,9 @@ final class AppRuntime {
                 } else {
                     self.state.updatePhase = .failed(outcome.message)
                     LogStore.shared.log("self-update 失败: \(outcome.message)")
-                    self.notifications.notify("⚠️ 自动更新失败", outcome.message)
+                    self.notifications.notify("⚠️ 更新失败", outcome.message)
+                    // 「未遂」（安装包未就绪/更新中来单）不算消耗本版本的自动尝试机会。
+                    if auto, outcome.retryable { self.autoUpdateTriedFor = nil }
                 }
             }
         }
@@ -186,8 +190,7 @@ final class AppRuntime {
                 // 「空闲时自动更新」开启 + 当前空闲 → 自动更新。每个 recommended 版本只自动尝试一次(防失败重连死循环)。
                 let rec = up.recommended ?? "?"
                 let idle = state.runningJob == nil && state.queuedJobs.isEmpty
-                // 自动更新仅对源码(git)安装生效: dmg 安装无法本地编译, 靠菜单栏「前往下载新版」引导。
-                if state.config.autoUpdate, idle, self.autoUpdateTriedFor != rec, SelfUpdater.isGitInstall() {
+                if state.config.autoUpdate, idle, self.autoUpdateTriedFor != rec {
                     self.autoUpdateTriedFor = rec
                     LogStore.shared.log("自动更新: 检测到新版本 v\(rec) 且空闲，开始自动更新")
                     self.performSelfUpdate(auto: true)
