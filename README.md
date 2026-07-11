@@ -1,6 +1,7 @@
 # lark-review-client
 
 团队 PR Review 客户端。在**你自己的机器**上跑，连**你自己的 Claude**，由团队的 Lark 机器人驱动。
+版本变更与已知问题说明见 **[CHANGELOG.md](CHANGELOG.md)**。
 
 谁在 Lark 里对 PR 卡片打 SLAP 表情 / 点「再来一轮」，服务端就把这次 review 派给**他本人**的客户端执行：在你本机建 git worktree、跑 `claude /pr-review`、把 inline / general comment 提交到 GitHub（用你自己的 Claude 账号），结论回传给服务端由机器人发回 Lark 线程。
 
