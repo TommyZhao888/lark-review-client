@@ -684,8 +684,8 @@ async function pump() {
   let result;
   try { result = await runReviewJob(job); }
   catch (e) { result = { exit_code: 1, log_tail: `客户端异常: ${e.message}`, verdict: '', general_comment_url: '', inline_count: '?', result_line: '' }; }
-  // 结果照常发回 hub —— 即使中途断线, 重连后这条也会被 hub 接受(hub 掉线时保留了该 job)。
-  send({ type: 'review_result', job_id: job.job_id, ...result });
+  // 结果经 pending 队列可靠投递: 断线窗口内完成 / 客户端重启都不丢, 重连后重发直至 hub ack。
+  queueResult({ type: 'review_result', job_id: job.job_id, ...result });
   const uNote = result.usage && result.usage.output_tokens != null
     ? ` · ${result.usage.input_tokens ?? '?'}/${result.usage.output_tokens} tokens $${result.usage.total_cost_usd ?? '?'}` : '';
   if (result.exit_code === 0 && result.verdict) notify(`✅ Review 完成 PR #${job.pr_num}`, `结论 ${result.verdict} · inline ${result.inline_count}${uNote} · 已用你的账号提交`);
@@ -710,6 +710,50 @@ let identity = { open_id: null, name: null, recommended_version: null };
 let managedRepos = loadManagedCache();
 
 function send(obj) { try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch {} }
+
+// ---------- review 结果可靠上报(至少一次投递) ----------
+// send() 是尽力而为: review 恰好在断线窗口内完成时结果会被静默丢弃 → hub 只能 20min 超时判失败
+// 再改派(白跑一轮)。这里把结果(含 token 用量)先落磁盘 pending 队列再发送; 重连注册成功后重发,
+// 收到 hub 的 review_result_ack 才删除 —— 跨断线、跨客户端进程重启都不丢。hub 侧幂等(job 已
+// finish 的重复投递直接忽略并回 ack), 重发不会造成重复处理。旧 hub 不回 ack → 条目按 24h 过期
+// 清理, 避免永久重发(升级 hub 后自然闭环)。
+const PENDING_RESULTS_FILE = CONFIG_PATH + '.pending-results.json';
+const PENDING_MAX_AGE_MS = 24 * 3600_000;
+let pendingResults = (() => {
+  try {
+    const j = JSON.parse(fs.readFileSync(PENDING_RESULTS_FILE, 'utf8'));
+    return Array.isArray(j) ? j : [];
+  } catch { return []; }
+})();
+function savePendingResults() {
+  try {
+    const tmp = PENDING_RESULTS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(pendingResults) + '\n');
+    fs.renameSync(tmp, PENDING_RESULTS_FILE);
+  } catch (e) { logErr('savePendingResults:', e.message); }
+}
+// 结果入队并立即尝试投递。payload = review_result 消息体(含 job_id/usage/...)。
+function queueResult(payload) {
+  pendingResults = pendingResults.filter((p) => Date.now() - (p.ts || 0) < PENDING_MAX_AGE_MS);
+  pendingResults.push({ ts: Date.now(), payload });
+  savePendingResults();
+  flushPendingResults();
+}
+function flushPendingResults() {
+  if (!registered || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const expired = pendingResults.filter((p) => Date.now() - (p.ts || 0) >= PENDING_MAX_AGE_MS);
+  if (expired.length) {
+    logErr(`丢弃 ${expired.length} 条超过 24h 未确认的 review 结果(hub 侧早已按超时处理)`);
+    pendingResults = pendingResults.filter((p) => Date.now() - (p.ts || 0) < PENDING_MAX_AGE_MS);
+    savePendingResults();
+  }
+  for (const p of pendingResults) send(p.payload);   // 全部重发; 以 hub 的 ack 逐条清除
+}
+function ackResult(jobId) {
+  const before = pendingResults.length;
+  pendingResults = pendingResults.filter((p) => !(p.payload && p.payload.job_id === jobId));
+  if (pendingResults.length !== before) savePendingResults();
+}
 
 // 注册(hub 侧幂等: 同 open_id 重发 register 直接替换记录, 在途 job 由 hub 从全局重建, 不丢)。
 // 不上报 open_id / name —— 由服务端按 token 解析并下发(防冒名)。
@@ -767,6 +811,7 @@ function connect() {
         }
         everRegistered = true;
         sendQuota();   // 注册后立即上报一次当前额度(心跳不再带 quota)
+        flushPendingResults();   // 断线/重启期间攒下的 review 结果(含用量)重发, 收到 ack 才清
         identity = { open_id: msg.open_id, name: msg.name, recommended_version: msg.recommended_version || null, upgrade: msg.upgrade || null };
         if (Array.isArray(msg.managed_repos)) { managedRepos = msg.managed_repos; saveManagedCache(managedRepos); }
         log(`registered as ${msg.name} (${msg.open_id}) ✓  本机 v${CLIENT_VERSION}，服务端推荐 v${msg.recommended_version || '?'}`);
@@ -832,6 +877,10 @@ function connect() {
         pump();
         break;
       }
+      case 'review_result_ack':
+        // hub 确认收到某条 review 结果(含 job 已 finish 的幂等分支)→ 从 pending 队列清除。
+        if (msg.job_id) ackResult(msg.job_id);
+        break;
       case 'pr_closed':
         if (repoParticipating(msg.repo)) {
           const c = resolveRepoConf(msg.repo);
