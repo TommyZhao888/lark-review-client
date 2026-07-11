@@ -19,6 +19,16 @@
   完整优先级：单项目 > 全局 > 服务端该项目默认 > 内置默认模板。提示词不预设，请按团队约定
   在配置页自行填写。
 
+### 新功能：Review token 用量统计
+
+- 每次 review 执行改用 `claude --output-format json`，从返回信封中取 **token 用量与成本**
+  （input/output/cache tokens、`total_cost_usd`、耗时、轮数）。老版 claude 不支持 json 输出时
+  自动回退纯文本，review 照常执行、仅无统计。
+- **本机展示**：配置页顶部显示今日/累计用量；每条 review 日志头部带 tokens/cost；
+  完成通知附带用量。逐条明细在 `~/.lark-review-client-logs/usage.jsonl`。
+- **上报服务端**：用量随 review 结果上报 hub，服务端逐条记入 `state/review-usage.jsonl`
+  （含人员/repo/PR/轮次），供后续做用量统计与任务分派平衡。
+
 ### 说明：偶发的 macOS 权限弹窗（媒体库 / 文件夹访问等）
 
 部分成员遇到过客户端运行期间 macOS 无缘由弹出权限请求（如「访问 Apple Music / 媒体库」

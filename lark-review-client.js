@@ -371,18 +371,77 @@ const REVIEW_LOG_DIR = process.env.LARK_REVIEW_CLIENT_REVIEW_LOG_DIR || path.joi
 try { fs.mkdirSync(REVIEW_LOG_DIR, { recursive: true }); } catch { /* ignore */ }
 
 // 把一次 review 的完整输出(claude stdout+stderr)写入本机日志文件, 返回路径。
-function writeReviewLog(job, code, parsed, logText) {
+function writeReviewLog(job, code, parsed, logText, usage) {
   try {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const file = path.join(REVIEW_LOG_DIR, `pr-${job.pr_num}-${ts}.log`);
+    const uLine = usage
+      ? `# tokens: in=${usage.input_tokens ?? '?'} out=${usage.output_tokens ?? '?'} cache_read=${usage.cache_read_input_tokens ?? '?'} cache_write=${usage.cache_creation_input_tokens ?? '?'}  cost=$${usage.total_cost_usd ?? '?'}  turns=${usage.num_turns ?? '?'}\n`
+      : '';
     const header =
       `# PR #${job.pr_num}  repo=${job.repo}  branch=${job.branch}\n` +
       `# job=${job.job_id}  model=${job.review_model || cfg.reviewModel}  time=${new Date().toISOString()}\n` +
       `# exit=${code}  verdict=${parsed.verdict || '-'}  inline=${parsed.inline_count}  general_comment=${parsed.general_comment_url || '-'}\n` +
+      uLine +
       `${'#'.repeat(64)}\n\n`;
     fs.writeFileSync(file, header + (logText || ''));
     return file;
   } catch (e) { logErr('writeReviewLog:', e.message); return null; }
+}
+
+// ---------- Review token 用量统计(本机记账 + 上报服务端) ----------
+// claude --print --output-format json 的信封含 usage/total_cost_usd 等; 老版 claude 无 json
+// 输出时解析失败 → usage 为 null(照常跑, 只是无统计)。逐条落 usage.jsonl, 供本机展示与核对。
+const USAGE_LOG_FILE = path.join(REVIEW_LOG_DIR, 'usage.jsonl');
+
+// 解析 claude json 信封: 成功 → {text(最终文本), usage(用量摘要)}; 非 json/形状不对 → null。
+function parseClaudeEnvelope(stdout) {
+  try {
+    const j = JSON.parse(stdout);
+    if (!j || typeof j !== 'object' || typeof j.result !== 'string') return null;
+    const u = j.usage || {};
+    return {
+      text: j.result,
+      usage: {
+        input_tokens: u.input_tokens ?? null,
+        output_tokens: u.output_tokens ?? null,
+        cache_read_input_tokens: u.cache_read_input_tokens ?? null,
+        cache_creation_input_tokens: u.cache_creation_input_tokens ?? null,
+        total_cost_usd: j.total_cost_usd ?? null,
+        duration_ms: j.duration_ms ?? null,
+        num_turns: j.num_turns ?? null,
+      },
+    };
+  } catch { return null; }
+}
+
+function recordUsage(job, model, code, parsed, usage) {
+  if (!usage) return;
+  try {
+    const rec = { ts: new Date().toISOString(), repo: job.repo, pr_num: String(job.pr_num),
+      job_id: job.job_id, model, exit_code: code, verdict: parsed.verdict || '', ...usage };
+    fs.appendFileSync(USAGE_LOG_FILE, JSON.stringify(rec) + '\n');
+  } catch (e) { logErr('recordUsage:', e.message); }
+}
+
+// 汇总本机用量(今日/累计), 供 /status 与配置页展示。文件不大(每 review 一行), 直接全读。
+function usageStats() {
+  const zero = () => ({ reviews: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0 });
+  const today = zero(), total = zero();
+  const dayKey = new Date().toLocaleDateString('sv');   // YYYY-MM-DD(本机时区)
+  let lines = [];
+  try { lines = fs.readFileSync(USAGE_LOG_FILE, 'utf8').split('\n'); } catch { /* 还没有记录 */ }
+  for (const ln of lines) {
+    if (!ln.trim()) continue;
+    let r; try { r = JSON.parse(ln); } catch { continue; }
+    const add = (t) => { t.reviews += 1; t.input_tokens += r.input_tokens || 0;
+      t.output_tokens += r.output_tokens || 0; t.cost_usd += r.total_cost_usd || 0; };
+    add(total);
+    if (String(r.ts || '').length >= 10 && new Date(r.ts).toLocaleDateString('sv') === dayKey) add(today);
+  }
+  today.cost_usd = Math.round(today.cost_usd * 10000) / 10000;
+  total.cost_usd = Math.round(total.cost_usd * 10000) / 10000;
+  return { today, total };
 }
 
 // 清理超过 worktreeMaxAgeDays 天的 review 日志, 避免无限增长。
@@ -579,26 +638,33 @@ async function runReviewJob(job) {
   if (runningJob && runningJob.job_id === job.job_id) runningJob.stage = 'claude';
   send({ type: 'review_progress', job_id: job.job_id, stage: 'claude' });
   log(`running claude --print --model ${model} in ${wt.worktreePath}`);
+  // --output-format json: 信封里带 usage/total_cost_usd(token 统计用)。老版 claude 不认/输出
+  // 非 json 时 parseClaudeEnvelope 返回 null → 按原始文本走老路径, usage 缺省为空, 零破坏。
   const r = await run(cfg.claudePath, [
-    '--print', '--model', model, '--dangerously-skip-permissions',
+    '--print', '--output-format', 'json', '--model', model, '--dangerously-skip-permissions',
     '--add-dir', conf.mainRepo, '--add-dir', conf.worktreeBase,
   ], { cwd: wt.worktreePath, stdin: prompt, env: { ...process.env, GIT_LFS_SKIP_SMUDGE: '1' } });
 
-  const logText = (r.stdout || '') + (r.stderr || '');
+  const envlp = parseClaudeEnvelope(r.stdout);
+  const usage = envlp ? envlp.usage : null;
+  const logText = (envlp ? envlp.text : (r.stdout || '')) + (r.stderr ? '\n' + r.stderr : '');
   const parsed = parseResult(logText);
-  log(`claude exited=${r.code} verdict=${parsed.verdict || '-'} inline=${parsed.inline_count}`);
+  log(`claude exited=${r.code} verdict=${parsed.verdict || '-'} inline=${parsed.inline_count}`
+    + (usage ? ` tokens(in/out)=${usage.input_tokens}/${usage.output_tokens} cost=$${usage.total_cost_usd}` : ''));
+  recordUsage(job, model, r.code, parsed, usage);
   // 反应式额度检测: 本次 review 若命中限额, 记下重置时间, 之后上报"额度不足", 服务端停派+换人。
   const qhit = detectQuotaHit(logText);
   if (qhit) {
     reactiveQuotaBlock = { reason: qhit.reason, reset_at: qhit.reset_at };
     log(`⚠️ 命中 Claude 限额(${qhit.reason}), 预计 ${qhit.reset_at ? new Date(qhit.reset_at).toLocaleString() : '?'} 恢复; 本机将上报额度不足`);
   }
-  const savedLog = writeReviewLog(job, r.code, parsed, logText);
+  const savedLog = writeReviewLog(job, r.code, parsed, logText, usage);
   if (savedLog) log(`review 完整日志已存: ${savedLog}`);
   return {
     exit_code: r.code,
     log_tail: logText.slice(-8000),
     quota: currentQuota(),        // 让服务端立即知道本机额度状态(命中限额那次尤其关键)
+    usage,                        // token 用量/成本(null = 本机 claude 不支持 json 输出), 服务端记账用
     ...parsed,
   };
 }
@@ -620,7 +686,9 @@ async function pump() {
   catch (e) { result = { exit_code: 1, log_tail: `客户端异常: ${e.message}`, verdict: '', general_comment_url: '', inline_count: '?', result_line: '' }; }
   // 结果照常发回 hub —— 即使中途断线, 重连后这条也会被 hub 接受(hub 掉线时保留了该 job)。
   send({ type: 'review_result', job_id: job.job_id, ...result });
-  if (result.exit_code === 0 && result.verdict) notify(`✅ Review 完成 PR #${job.pr_num}`, `结论 ${result.verdict} · inline ${result.inline_count} · 已用你的账号提交`);
+  const uNote = result.usage && result.usage.output_tokens != null
+    ? ` · ${result.usage.input_tokens ?? '?'}/${result.usage.output_tokens} tokens $${result.usage.total_cost_usd ?? '?'}` : '';
+  if (result.exit_code === 0 && result.verdict) notify(`✅ Review 完成 PR #${job.pr_num}`, `结论 ${result.verdict} · inline ${result.inline_count}${uNote} · 已用你的账号提交`);
   else notify(`❌ Review 未完成 PR #${job.pr_num}`, `exit=${result.exit_code} ${(result.log_tail || '').slice(0, 80)}`);
   runningJob = null;
   busy = false;
@@ -949,6 +1017,7 @@ function startConfigServer() {
         name: identity.name, open_id: identity.open_id, recommended_version: identity.recommended_version,
         outdated: !!identity.upgrade, upgrade: identity.upgrade || null,   // 有新版本时供配置页显示更新提示/按钮
         managed_repo_count: managedRepos.length,   // 配置页据此感知清单何时到位, 自动补渲染
+        usage: usageStats(),                       // 本机 review token 用量(今日/累计), 配置页展示
         // 执行中/排队的 Review 任务(供菜单栏插件 lionreview 显示; 无防护/审计)。
         running: runningJob ? [{ repo: runningJob.repo, pr_num: runningJob.pr_num, branch: runningJob.branch, stage: runningJob.stage, since: runningJob.since }] : [],
         queued: queue.map((j) => ({ repo: j.repo, pr_num: j.pr_num })),

@@ -65,6 +65,7 @@
       <div><span>open_id</span><b class="mono" id="iOid">—</b></div>
     </div>
     <div class="muted" id="connHint" style="margin-top:8px"></div>
+    <div class="muted" id="usageLine" style="margin-top:6px"></div>
   </div>
 
   <div class="card">
@@ -269,6 +270,11 @@ async function refreshStatus(){
     $('conn').innerHTML = (s.connected?'<span class="dot on"></span>已连接':'<span class="dot off"></span>未连接')
       + (s.registered?' · 已注册':'');
     $('iName').textContent = s.name||'—'; $('iOid').textContent = s.open_id||'—';
+    if (s.usage && s.usage.total && s.usage.total.reviews) {
+      const f=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n||0);
+      const t=s.usage.today, a=s.usage.total;
+      $('usageLine').textContent = `Review 用量 · 今日 ${t.reviews} 次 (in ${f(t.input_tokens)} / out ${f(t.output_tokens)} / $${t.cost_usd}) · 累计 ${a.reviews} 次 (in ${f(a.input_tokens)} / out ${f(a.output_tokens)} / $${a.cost_usd})`;
+    }
     $('connHint').textContent = s.connected ? (s.recommended_version?('服务端推荐客户端 v'+s.recommended_version):'') : '连上服务端后会自动显示你的姓名/open_id。检查 serverUrl 与 token。';
     // 版本/更新卡
     $('uCur').textContent = 'v'+(s.client_version||'?');
