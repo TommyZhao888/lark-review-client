@@ -493,6 +493,23 @@ line, plain text, with NOTHING after it — no summary, no markdown, no code fen
 Do NOT end with a prose summary; the result line must be the last thing you print:
 ___RESULT___ verdict=<APPROVE|COMMENT|REQUEST_CHANGES> general_comment_url=<url-or-NONE> inline_count=<integer>`;
 
+// 结果行契约(独立于任何提示词): 服务端解析 review 结论只认这一行。用户自定义提示词【无需】
+// 自带它 —— renderPrompt 检测到提示词里没有 ___RESULT___ 时自动在末尾【追加】本块(append-only,
+// 明确声明不改变上方 review 要求的任何含义), 保证无论提示词怎么写, 服务端都能拿到确定的结论;
+// 提示词已含契约(如内置模板)则不重复附加。
+const RESULT_CONTRACT_SUFFIX = `
+
+---
+[Appended by lark-review-client — output format contract ONLY. It does NOT change, override, or
+reinterpret ANY review instruction above; follow the instructions above exactly as written.]
+
+CRITICAL RESULT CONTRACT — the run is ONLY counted as done if your very last output is the result line.
+Regardless of outcome (approve / changes / error), your FINAL output MUST be exactly ONE line, on its own
+line, plain text, with NOTHING after it — no summary, no markdown, no code fence, no closing remarks:
+___RESULT___ verdict=<APPROVE|COMMENT|REQUEST_CHANGES> general_comment_url=<url-or-NONE> inline_count=<integer>
+(If the instructions above did not ask you to post/submit anything, use general_comment_url=NONE and
+inline_count=0; verdict must still reflect your actual review conclusion.)`;
+
 function renderPrompt(job, worktreePath, ciStatus, repoTmpl) {
   // 提示词优先级: 该项目的本机提示词(repos[].prompt) > 本机全局提示词(globalPrompt, 对所有项目生效) >
   // 服务端该 repo 默认(review_job.prompt_template 下发) > 按 provider 选内置默认模板。
@@ -501,12 +518,14 @@ function renderPrompt(job, worktreePath, ciStatus, repoTmpl) {
   const tmpl = (repoTmpl && String(repoTmpl).trim())
     ? repoTmpl
     : (globalTmpl || job.prompt_template || builtin);
-  return tmpl
+  let rendered = tmpl
     .replaceAll('{{PR_NUM}}', String(job.pr_num))
     .replaceAll('{{WORKTREE_PATH}}', worktreePath)
     .replaceAll('{{CI_STATUS}}', ciStatus)
     .replaceAll('{{PR_URL}}', String(job.pr_url || ''))
     .replaceAll('{{REPO}}', String(job.repo || ''));
+  if (!rendered.includes('___RESULT___')) rendered += RESULT_CONTRACT_SUFFIX;
+  return rendered;
 }
 
 // ---------- 异步执行（不阻塞事件循环，保证 review 期间心跳/pong 正常）----------
