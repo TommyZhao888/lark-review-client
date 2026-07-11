@@ -23,16 +23,18 @@ final class ProtocolTests: XCTestCase {
         XCTAssertNil(obj["name"])
     }
 
+    // v1.6.1 起心跳精简为只保活(不带 quota), 额度改走独立 'quota' 消息 —— 测试与协议同步。
     func testHeartbeat() throws {
-        let obj = try jsonObject(.heartbeat(quota: QuotaStatus()))
+        let obj = try jsonObject(.heartbeat)
         XCTAssertEqual(obj["type"] as? String, "heartbeat")
-        XCTAssertEqual((obj["quota"] as? [String: Any])?["ok"] as? Bool, true)
+        XCTAssertNil(obj["quota"])
     }
 
-    func testHeartbeatQuotaExhausted() throws {
+    func testQuotaMessageExhausted() throws {
         let q = QuotaStatus(ok: false, reason: "5h window 92%", resetAtMs: 1_700_000_000_000,
                             fiveHourPct: 92, fiveHourResetAtMs: 1_700_000_000_000)
-        let obj = try jsonObject(.heartbeat(quota: q))
+        let obj = try jsonObject(.quota(quota: q))
+        XCTAssertEqual(obj["type"] as? String, "quota")
         let quota = obj["quota"] as? [String: Any]
         XCTAssertEqual(quota?["ok"] as? Bool, false)
         XCTAssertEqual(quota?["reason"] as? String, "5h window 92%")
