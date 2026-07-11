@@ -106,11 +106,18 @@ npm install
 启动客户端后,浏览器开 **`http://127.0.0.1:8790/`** 就能在网页里配置 claude 路径、模型、
 serverUrl、token，**保存即热重载**(自动按新配置重连)。
 
-**项目(repos)由服务端清单驱动**：可参与的项目由管理员在服务端 hub「Repo 规则」里配置，
-客户端连上后自动下发。首次使用只需先填 serverUrl + token 保存，连上后配置页的**下拉列表**
-会列出服务端受管的项目——选择添加，填该项目在你本机的 clone 路径（worktree 目录留空自动按
-`<clone路径>-worktrees` 补全）。**提示词按项目在本机单独配置**（只影响你自己的 client），
-留空则依次回退：服务端为该项目配的默认 → 内置默认模板。
+**项目(repos)由服务端清单驱动,默认全自动**：可参与的项目由管理员在服务端 hub「Repo 规则」里
+配置，客户端连上后自动下发并**自动参与**（v1.7+）。首次使用只需填 serverUrl + token 保存——
+之后第一次被派到某项目的 review 时,客户端会自动把仓库 clone 到**默认克隆根目录**
+（默认 `~/LarkReviewRepos/<owner-repo>`,配置页可改）,worktree 自动放旁边的 `…-worktrees`,
+无需任何手工配置。已经手动 clone 过 / 想用自己路径的项目,在配置页给该项目填 `mainRepo`
+即可（**旧的手动配置方式完全兼容**,填了就用你的路径）;不想自动参与全部项目可关掉
+「自动参与」开关,回到只接本机配置过的项目。
+
+**提示词两级配置**（都只影响你自己的 client,首次安装请自行设置）：
+- **全局提示词**：对所有项目生效;
+- **单项目提示词**：在该项目块里填,优先于全局。
+留空则依次回退：全局提示词 → 服务端为该项目配的默认 → 内置默认模板。
 你的**姓名和 open_id 不用填**——连上服务端后由管理员在服务端设定并自动下发,网页上只读显示。
 
 也可以手动编辑 `~/.lark-review-client.json`（字段见下表）。
@@ -121,7 +128,10 @@ serverUrl、token，**保存即热重载**(自动按新配置重连)。
 |------|------|------|
 | `serverUrl` | ✅ | 服务端 review-hub 地址，向管理员索取（本机自测 `ws://127.0.0.1:8788`）|
 | `token` | ✅ | 与你绑定的鉴权串，向管理员索取 |
-| `repos` | | `"owner/repo": { mainRepo, worktreeBase, prompt? }` 映射。repo 名必须在服务端受管清单里（推荐直接在配置页从下拉列表添加）。`mainRepo` 是你本机的 clone 路径，`worktreeBase` 是放临时 worktree 的目录（会自动创建 `pr-<N>` 子目录），`prompt` 是该项目的本机提示词（可选，优先于服务端默认；支持占位符 `{{PR_NUM}}` `{{WORKTREE_PATH}}` `{{CI_STATUS}}`）。可先留空 `{}`，连上后再配 |
+| `repos` | | `"owner/repo": { mainRepo?, worktreeBase?, prompt? }` 映射，**全部可选**（v1.7+）。`mainRepo` 填了 = 用你本机指定的 clone 路径（旧行为）；留空/无该条目 = 自动模式：clone 到 `repoBaseDir/<owner-repo>`。`worktreeBase` 留空自动 = `<mainRepo>-worktrees`。`prompt` 是该项目的本机提示词（优先于全局/服务端默认）。通常整个留空 `{}` 即可 |
+| `autoRepos` | | 默认 `true`：自动参与服务端下发的全部受管项目（首次派单自动 clone）。设 `false` = 只参与 `repos` 里配置的项目（旧行为）|
+| `repoBaseDir` | | 自动模式的默认克隆根目录，默认 `~/LarkReviewRepos` |
+| `globalPrompt` | | 全局 review 提示词（所有项目生效，单项目 `prompt` 优先）。支持占位符 `{{PR_NUM}}` `{{WORKTREE_PATH}}` `{{CI_STATUS}}` `{{PR_URL}}` `{{REPO}}` |
 | `reviewModel` | | claude 模型，默认 `claude-opus-4-8`（必须你账号有权限）|
 | `claudePath` | | claude 可执行路径，默认 `claude` |
 | `configPort` | | 本机配置页端口，默认 `8790` |
@@ -171,6 +181,7 @@ ln -sf "$PWD/lionreview.5s.sh" "<SwiftBar 插件目录>/lionreview.5s.sh"
 
 ## 它会做 / 不会做什么
 
+- ✅ 首次被派到未 clone 的项目时自动 clone（GitHub 走 `gh` 带鉴权；ADO 从派单的 PR 地址推导远端、优先用 `AZURE_DEVOPS_EXT_PAT` 认证并写入该 repo 的 `http.extraheader` 让后续 fetch 免交互；`--filter=blob:none` 加速，服务端不支持时自动全量）
 - ✅ 在 `worktreeBase/pr-<N>` 建/更新 worktree（`GIT_LFS_SKIP_SMUDGE=1`，只拉源码）
 - ✅ 跑 `claude --print --model … --dangerously-skip-permissions --add-dir <mainRepo> --add-dir <worktreeBase>`
 - ✅ review 结果（verdict / inline 数 / general comment url）回传服务端

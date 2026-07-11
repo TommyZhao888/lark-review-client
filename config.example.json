@@ -8,8 +8,15 @@
   "worktreeMaxAgeDays": 14,
   "configPort": 8790,
 
-  "_note_quota": "额度感知【全自动, 无需配置】: 客户端每 2 分钟跑一次 `claude -p /usage`(headless, 零 token, 不碰你的 statusLine)读取 5 小时/7 天额度, 5 小时窗已用 >= 90% 就上报额度不足, 服务端不再派 review 给你、自动换有额度的人; 并把 5 小时用量%+恢复时间上报到 hub 管理页供派活参考。阈值可用 quotaFiveHourThreshold/quotaSevenDayThreshold 覆盖(通常不填)。",
+  "_note_auto": "v1.7+ 项目全自动: autoRepos(默认 true)= 自动参与服务端下发的全部受管项目, 首次被派单时自动 clone 到 repoBaseDir/<owner-repo>(repoBaseDir 默认 ~/LarkReviewRepos), worktree 在旁边的 …-worktrees。所以 repos 通常整个留空 {} 即可; 想用自己的路径再按项目单独配。",
+  "repoBaseDir": "",
 
+  "_note_prompt": "提示词优先级: 单项目 repos[].prompt > 全局 globalPrompt > 服务端该项目默认 > 内置默认模板。首次安装请按团队约定自行设置(程序不代设)。支持占位符 {{PR_NUM}} {{WORKTREE_PATH}} {{CI_STATUS}} {{PR_URL}} {{REPO}}。",
+  "globalPrompt": "",
+
+  "_note_quota": "额度感知【全自动, 无需配置】: 客户端每 10 分钟跑一次 `claude -p /usage`(headless, 零 token, 不碰你的 statusLine)读取 5 小时/7 天额度, 5 小时窗已用 >= 90% 就上报额度不足, 服务端不再派 review 给你、自动换有额度的人; 并把 5 小时用量%+恢复时间上报到 hub 管理页供派活参考。阈值可用 quotaFiveHourThreshold/quotaSevenDayThreshold 覆盖(通常不填)。",
+
+  "_note_repos": "repos 通常留空 {}。只有想【自定义某项目的本机路径/提示词】才需要加条目, 三个字段全可选: mainRepo 留空 = 自动 clone 到 repoBaseDir/<owner-repo>; worktreeBase 留空 = mainRepo + '-worktrees'; prompt 留空 = 全局/服务端/内置默认。示例条目请按需修改或整段删掉:",
   "repos": {
     "Liontech-tw/lion-trip-app-global": {
       "mainRepo": "/Users/you/Source/lion-trip-app-global",
@@ -18,6 +25,5 @@
     }
   },
 
-  "_note": "无需填 name / openId —— 连上服务端后由服务端按 token 自动下发。也可不手写本文件, 直接开 http://127.0.0.1:8790 用网页配置。",
-  "_note_repos": "可参与的项目清单由服务端下发(管理员在 hub「Repo 规则」配置)。推荐流程: repos 先留空 {}, 填好 serverUrl/token 启动, 到配置页从下拉列表添加项目并填本机路径。提示词按项目配 repos[].prompt(仅本机生效), 留空 = 服务端为该项目配的默认 > 内置默认模板。手写时 repo 名必须与服务端清单一致, 否则不会被派单。"
+  "_note": "无需填 name / openId —— 连上服务端后由服务端按 token 自动下发。也可不手写本文件, 直接开 http://127.0.0.1:8790 用网页配置。"
 }

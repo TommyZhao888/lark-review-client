@@ -99,15 +99,29 @@
       <div><label>worktree 最长保留天数</label><input id="worktreeMaxAgeDays" type="number" placeholder="14"></div>
       <div><label>心跳间隔(ms)</label><input id="heartbeatMs" type="number" placeholder="15000"></div>
     </div>
+    <label>默认克隆根目录 repoBaseDir</label>
+    <input id="repoBaseDir" class="mono" placeholder="~/LarkReviewRepos">
+    <div class="muted" style="margin-top:4px">未单独配置路径的项目自动 clone 到 <code>该目录/owner-repo</code>(worktree 在旁边的 <code>…-worktrees</code>)。改动只影响之后的自动 clone,已 clone 的项目不动。</div>
+  </div>
+
+  <div class="card">
+    <h2>全局 Review 提示词(可选)</h2>
+    <div class="muted" style="margin-bottom:8px">对<b>所有项目</b>生效(仅本机)。优先级: 单项目提示词 &gt; 全局提示词 &gt; 服务端该项目默认 &gt; 内置默认模板。留空 = 不启用。支持占位符 <code>{{PR_NUM}}</code> <code>{{WORKTREE_PATH}}</code> <code>{{CI_STATUS}}</code> <code>{{PR_URL}}</code> <code>{{REPO}}</code>。</div>
+    <textarea id="globalPrompt" rows="5" placeholder="留空 = 各项目按 服务端默认 > 内置默认模板"></textarea>
+    <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+      <button class="sm" type="button" onclick="fillGlobalPrompt('gh')">填入内置默认(GitHub)以编辑</button>
+      <button class="sm" type="button" onclick="fillGlobalPrompt('azdo')">填入内置默认(ADO)以编辑</button>
+      <button class="sm" type="button" onclick="document.getElementById('globalPrompt').value=''">清空(不启用)</button>
+    </div>
   </div>
 
   <div class="card">
     <h2>项目(repos)</h2>
-    <div class="muted" style="margin-bottom:10px">从下拉列表选择要参与的项目(清单由管理员在服务端 hub「Repo 规则」配置并下发)。每个项目填<b>你本机</b>的路径;提示词按项目<b>在本机单独配置</b>,只影响你自己的 client,留空 = 服务端为该项目配的默认 &gt; 内置默认模板。支持占位符 <code>{{PR_NUM}}</code> <code>{{WORKTREE_PATH}}</code> <code>{{CI_STATUS}}</code>。</div>
-    <div style="display:flex; gap:8px; margin-bottom:10px">
-      <select id="repoSel" style="flex:1"></select>
-      <button class="sm acc" id="repoAddBtn" onclick="addSelectedRepo()">+ 添加</button>
-    </div>
+    <label class="muted" style="margin:0 0 10px; display:flex; align-items:center; gap:6px">
+      <input type="checkbox" id="autoRepos" checked style="width:auto" onchange="markReposDirty()">
+      自动参与服务端下发的全部项目(路径留空的项目在首次派单时自动 clone 到默认目录)
+    </label>
+    <div class="muted" style="margin-bottom:10px">清单由管理员在服务端 hub「Repo 规则」配置并下发;实际是否派单给你由服务端候选池决定。每个项目的<b>路径和提示词都可留空</b>:路径留空 = 自动 clone 到默认克隆根目录;提示词留空 = 全局提示词 &gt; 服务端该项目默认 &gt; 内置默认模板。填了路径 = 用你指定的本机 clone(与旧版行为一致)。</div>
     <div id="repos"></div>
     <div id="reposHint" class="muted" style="margin:8px 0"></div>
     <div style="display:flex; gap:8px">
@@ -142,8 +156,8 @@ const $ = id => document.getElementById(id);
 function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1800); }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-// ---- 项目列表: 下拉选择服务端受管项目添加; 路径/提示词按项目在本机配置 ----
-let MANAGED = [];                       // 服务端受管清单 [{repo, prompt}]
+// ---- 项目列表: 服务端受管项目全部展示(autoRepos 下自动参与); 路径/提示词均可留空 ----
+let MANAGED = [];                       // 服务端受管清单 [{repo, prompt, provider}]
 let reposDirty = false;                 // 用户动过项目区未保存时, 不自动覆盖渲染
 let lastManagedCount = -1;              // /status 的清单数量变化 → 自动补渲染(如刚连上服务端)
 function markReposDirty(){ reposDirty = true; }
@@ -151,29 +165,37 @@ function isManaged(name){ return MANAGED.some(m=>m.repo===name); }
 function serverPromptOf(name){ const m=MANAGED.find(x=>x.repo===name); return m ? (m.prompt||'') : ''; }
 function providerOf(name){ const m=MANAGED.find(x=>x.repo===name); return (m&&m.provider==='azdo') ? 'azdo' : 'github'; }
 function builtinPromptOf(name){ return providerOf(name)==='azdo' ? (window.__defaultPromptAzdo||'') : (window.__defaultPrompt||''); }
+function autoPathOf(name){
+  const base = ($('repoBaseDir').value.trim() || window.__repoBaseDir || '~/LarkReviewRepos');
+  return base.replace(/\/+$/,'') + '/' + String(name).replace(/[\\/]+/g,'-');
+}
+function fillGlobalPrompt(kind){
+  $('globalPrompt').value = kind==='azdo' ? (window.__defaultPromptAzdo||'') : (window.__defaultPrompt||'');
+}
 
-// 一个已添加的项目块: 本机路径 + 本机 per-repo 提示词(留空则走全局/服务端/内置)。
+// 一个项目块。受管项目常驻展示(不可删, 全空 = 全自动); 非受管(本地遗留)可删。
 function repoBlock(name, conf){
   conf = conf || {};
   const managed = isManaged(name);
   const sp = serverPromptOf(name);
   const d = document.createElement('div'); d.className='repo rblock'; d.dataset.repo=name;
-  d.innerHTML = `<button class="sm rm" type="button">删除</button>
+  d.innerHTML = `${managed ? '' : '<button class="sm rm" type="button">删除</button>'}
     <div style="margin-bottom:4px"><b class="mono">${esc(name)}</b> ${managed
       ? (providerOf(name)==='azdo' ? '<span class="pill">服务端受管 · Azure DevOps</span>' : '<span class="pill">服务端受管 · GitHub</span>')
       : '<span class="pill warn">⚠ 服务端未受管,不会被派单</span>'}</div>
     <div class="two">
-      <div><label>本机 clone 路径 mainRepo</label><input class="mono r-main" value="${esc(conf.mainRepo||'')}" placeholder="/Users/you/Source/xxx"></div>
-      <div><label>worktree 目录 worktreeBase</label><input class="mono r-wt" value="${esc(conf.worktreeBase||'')}" placeholder="留空 = mainRepo + &quot;-worktrees&quot;"></div>
+      <div><label>本机 clone 路径 mainRepo(留空 = 自动)</label><input class="mono r-main" value="${esc(conf.mainRepo||'')}" placeholder="留空 = ${esc(autoPathOf(name))}"></div>
+      <div><label>worktree 目录 worktreeBase(留空 = 自动)</label><input class="mono r-wt" value="${esc(conf.worktreeBase||'')}" placeholder="留空 = mainRepo + &quot;-worktrees&quot;"></div>
     </div>
     <label>该项目的 review 提示词(仅本机生效,可选)</label>
-    <textarea class="r-prompt" rows="4" placeholder="留空 = 用${sp?'服务端为该项目配的默认提示词':'内置默认模板'}">${esc(conf.prompt||'')}</textarea>
+    <textarea class="r-prompt" rows="4" placeholder="留空 = 全局提示词 > ${sp?'服务端为该项目配的默认提示词':'内置默认模板'}">${esc(conf.prompt||'')}</textarea>
     <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
       ${sp?'<button class="sm fill-server" type="button">填入服务端默认以编辑</button>':''}
       <button class="sm fill-builtin" type="button">填入内置默认以编辑</button>
       <button class="sm clear-prompt" type="button">清空(用默认)</button>
     </div>`;
-  d.querySelector('.rm').addEventListener('click', ()=>{ d.remove(); markReposDirty(); refreshRepoSel(); });
+  const rm = d.querySelector('.rm');
+  if (rm) rm.addEventListener('click', ()=>{ d.remove(); markReposDirty(); });
   const fsv = d.querySelector('.fill-server');
   if (fsv) fsv.addEventListener('click', ()=>{ d.querySelector('.r-prompt').value = serverPromptOf(name); markReposDirty(); });
   d.querySelector('.fill-builtin').addEventListener('click', ()=>{ d.querySelector('.r-prompt').value = builtinPromptOf(name); markReposDirty(); });
@@ -201,35 +223,23 @@ function manualRow(name='', conf){
 }
 function addManualRepo(){ manualRow(); }
 
-// 下拉里只列"服务端受管且尚未添加"的项目。
-function refreshRepoSel(){
-  const added = new Set([...document.querySelectorAll('#repos .repo')].map(d=>d.dataset.repo).filter(Boolean));
-  const avail = MANAGED.filter(m=>!added.has(m.repo));
-  $('repoSel').innerHTML = avail.length
-    ? avail.map(m=>`<option value="${esc(m.repo)}">${esc(m.repo)}${m.provider==='azdo'?' [Azure DevOps]':''}${m.prompt?' (有服务端默认提示词)':''}</option>`).join('')
-    : `<option value="">${MANAGED.length?'(服务端清单里的项目已全部添加)':'(等待服务端下发项目清单…)'}</option>`;
-  $('repoAddBtn').disabled = !avail.length;
-}
-function addSelectedRepo(){
-  const v = $('repoSel').value; if(!v) return;
-  repoBlock(v, {});
-  refreshRepoSel(); markReposDirty();
-}
-
 function renderRepos(managed, localRepos, registered){
   MANAGED = managed || [];
   $('repos').innerHTML='';
+  // 受管项目全部常驻展示(全空 = 全自动: 自动参与 + 自动 clone), 有本地覆盖则回填;
+  // 本地配置里多出的非受管项目按旧式块/行展示(可删)。
+  MANAGED.forEach(m=>repoBlock(m.repo, (localRepos||{})[m.repo]||{}));
   Object.keys(localRepos||{}).forEach(k=>{
-    if (MANAGED.length) repoBlock(k, localRepos[k]);           // 有清单: 受管/未受管由块内标识
+    if (isManaged(k)) return;
+    if (MANAGED.length) repoBlock(k, localRepos[k]);           // 有清单: 未受管由块内标识
     else manualRow(k, localRepos[k]);                          // 无清单(旧服务端): 旧式行
   });
   const noManaged = !MANAGED.length;
   $('manualAddBtn').classList.toggle('hide', !noManaged);
   $('reposHint').textContent = noManaged
     ? (registered ? '服务端未下发项目清单(服务端版本较旧或未配 Repo 规则), 可手动添加。'
-                  : '尚未连接服务端 —— 先填好上方 serverUrl 和 token 并保存, 连上后下拉列表会自动列出可参与的项目。')
+                  : '尚未连接服务端 —— 先填好上方 serverUrl 和 token 并保存, 连上后这里会自动列出可参与的项目。')
     : '';
-  refreshRepoSel();
   lastManagedCount = MANAGED.length;
   reposDirty = false;
 }
@@ -245,6 +255,9 @@ async function load(){
   $('serverUrl').value=c.serverUrl||''; $('token').value=c.token||'';
   $('claudePath').value=c.claudePath||''; $('reviewModel').value=c.reviewModel||'';
   $('worktreeMaxAgeDays').value=c.worktreeMaxAgeDays||''; $('heartbeatMs').value=c.heartbeatMs||'';
+  $('repoBaseDir').value=c.repoBaseDir||''; $('globalPrompt').value=c.globalPrompt||'';
+  $('autoRepos').checked = c.autoRepos!==false;
+  window.__repoBaseDir=c.repoBaseDir||'';               // 项目块的"留空 = 自动路径"占位提示用
   window.__defaultPrompt=c.defaultPrompt||'';           // 供各项目块「填入内置默认以编辑」(GitHub)
   window.__defaultPromptAzdo=c.defaultPromptAzdo||'';   // 同上(Azure DevOps 项目)
   renderRepos(c.managedRepos||[], c.repos||{}, false);
@@ -313,14 +326,21 @@ function collect(){
     const main=d.querySelector('.r-main').value.trim();
     let wt=d.querySelector('.r-wt').value.trim();
     if(main && !wt) wt = main + '-worktrees';   // 按约定补全
-    repos[n]={ mainRepo:main, worktreeBase:wt };
     const p=d.querySelector('.r-prompt') ? d.querySelector('.r-prompt').value : '';
-    if(p && p.trim()) repos[n].prompt = p;      // 该项目的本机提示词(留空不写)
+    const entry={};
+    if(main) entry.mainRepo=main;
+    if(wt) entry.worktreeBase=wt;
+    if(p && p.trim()) entry.prompt=p;           // 该项目的本机提示词(留空不写)
+    // 受管项目三项全空 = 全自动, 不落盘; 非受管(手动)项目保留占位以维持参与。
+    if(Object.keys(entry).length || !isManaged(n)) repos[n]=entry;
   });
   return {
     serverUrl:$('serverUrl').value.trim(), token:$('token').value.trim(),
     claudePath:$('claudePath').value.trim()||'claude', reviewModel:$('reviewModel').value.trim()||'claude-opus-4-8',
     worktreeMaxAgeDays:Number($('worktreeMaxAgeDays').value)||14, heartbeatMs:Number($('heartbeatMs').value)||15000,
+    autoRepos:$('autoRepos').checked,
+    repoBaseDir:$('repoBaseDir').value.trim(),
+    globalPrompt:$('globalPrompt').value,
     repos
   };
 }
@@ -328,17 +348,13 @@ async function save(){
   $('msg').textContent='';
   const cfg=collect();
   if(!cfg.serverUrl||!cfg.token){ $('msg').innerHTML='<span class="err">serverUrl 和 token 必填</span>'; return; }
-  for(const [n,rc] of Object.entries(cfg.repos)){
-    if(!rc.mainRepo||!rc.worktreeBase){ $('msg').innerHTML='<span class="err">项目 '+esc(n)+' 需填 mainRepo(worktreeBase 可留空自动补全)</span>'; return; }
-  }
   try {
     const r = await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());
     if(r.ok){
       reposDirty=false;
-      const none = !Object.keys(cfg.repos).length;
       toast('已保存,正在按新配置重连…');
-      $('msg').innerHTML = none ? '<span class="ok">已保存并热重载</span> <span class="muted">(未启用任何项目, 暂不会接单; 连上后从清单勾选)</span>'
-                                : '<span class="ok">已保存并热重载</span>';
+      $('msg').innerHTML = '<span class="ok">已保存并热重载</span>'
+        + (cfg.autoRepos ? '' : ' <span class="muted">(已关闭自动参与, 只接本机 repos 里配置的项目)</span>');
       setTimeout(refreshStatus,1500); setTimeout(refreshStatus,3500);
     }
     else $('msg').innerHTML='<span class="err">'+esc(r.error||'保存失败')+'</span>';
