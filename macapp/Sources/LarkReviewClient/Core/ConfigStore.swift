@@ -30,6 +30,10 @@ enum ConfigStore {
         if let n = obj["notify"] as? Bool { cfg.notify = n }
         if let s = obj["notifySound"] as? String { cfg.notifySound = s }
         if let a = obj["autoUpdate"] as? Bool { cfg.autoUpdate = a }
+        if let ar = obj["autoRepos"] as? Bool { cfg.autoRepos = ar }
+        if let rb = obj["repoBaseDir"] as? String,
+           !rb.trimmingCharacters(in: .whitespaces).isEmpty { cfg.repoBaseDir = rb }
+        if let gp = obj["globalPrompt"] as? String { cfg.globalPrompt = gp }
         if let qp = obj["quotaSnapshotPath"] as? String { cfg.quotaSnapshotPath = qp }
         if let q5 = obj["quotaFiveHourThreshold"] as? Int, q5 > 0 { cfg.quotaFiveHourThreshold = q5 }
         if let q7 = obj["quotaSevenDayThreshold"] as? Int, q7 > 0 { cfg.quotaSevenDayThreshold = q7 }
@@ -69,16 +73,26 @@ enum ConfigStore {
         cur["heartbeatMs"] = cfg.heartbeatMs > 0 ? cfg.heartbeatMs : 15000
         cur["notify"] = cfg.notify
         cur["autoUpdate"] = cfg.autoUpdate
+        cur["autoRepos"] = cfg.autoRepos
+        let baseDir = cfg.repoBaseDir.trimmingCharacters(in: .whitespaces)
+        cur["repoBaseDir"] = baseDir.isEmpty ? NSHomeDirectory() + "/LarkReviewRepos" : baseDir
+        if cfg.globalPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            cur.removeValue(forKey: "globalPrompt")
+        } else {
+            cur["globalPrompt"] = cfg.globalPrompt
+        }
         if cfg.notifySound.isEmpty { cur.removeValue(forKey: "notifySound") }
         else { cur["notifySound"] = cfg.notifySound }
 
-        // repos 入库前收敛字段：{mainRepo, worktreeBase, prompt?}；prompt 空白则不落盘。
+        // repos 入库前收敛字段(对齐 Node sanitizeRepos): 路径可留空 = 自动模式, 只写非空字段;
+        // 三个字段全空的条目不落盘(受管项目本就自动参与, 无需占位)。
         var repos: [String: Any] = [:]
-        for (name, rc) in cfg.repos {
-            var e: [String: Any] = [
-                "mainRepo": rc.mainRepo.trimmingCharacters(in: .whitespaces),
-                "worktreeBase": rc.worktreeBase.trimmingCharacters(in: .whitespaces),
-            ]
+        for (name, rc) in cfg.repos where !rc.isEmpty {
+            var e: [String: Any] = [:]
+            let main = rc.mainRepo.trimmingCharacters(in: .whitespaces)
+            let wt = rc.worktreeBase.trimmingCharacters(in: .whitespaces)
+            if !main.isEmpty { e["mainRepo"] = main }
+            if !wt.isEmpty { e["worktreeBase"] = wt }
             if let p = rc.prompt, !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 e["prompt"] = p
             }
@@ -86,7 +100,7 @@ enum ConfigStore {
         }
         cur["repos"] = repos
 
-        // 身份归服务端，清掉历史遗留字段；全局提示词已废弃。
+        // 身份归服务端，清掉历史遗留字段；promptOverride 为 1.2 前的旧全局提示词字段(现为 globalPrompt)。
         cur.removeValue(forKey: "name")
         cur.removeValue(forKey: "openId")
         cur.removeValue(forKey: "promptOverride")

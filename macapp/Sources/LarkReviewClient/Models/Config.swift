@@ -1,14 +1,28 @@
 import Foundation
 
 /// 客户端版本：升级功能时手动 +1（与 Info.plist 保持一致）。服务端据此判断是否提示升级。
-let CLIENT_VERSION = "1.6.1"
+let CLIENT_VERSION = "1.7.0"
 
 /// 单个 repo 的本机配置（~/.lark-review-client.json 的 repos["owner/repo"]）。
+/// v1.7 起路径均可留空 = 自动模式（clone 到 repoBaseDir/<owner-repo>）。
 struct RepoConfig: Codable, Equatable {
-    var mainRepo: String
-    var worktreeBase: String
+    var mainRepo: String = ""
+    var worktreeBase: String = ""
     /// 该项目的本机提示词覆盖；空白不落盘。
     var prompt: String?
+    var isEmpty: Bool {
+        mainRepo.trimmingCharacters(in: .whitespaces).isEmpty
+            && worktreeBase.trimmingCharacters(in: .whitespaces).isEmpty
+            && (prompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+/// 某项目在本机的生效路径（手动配置优先，缺省按 repoBaseDir 自动解析，与 Node resolveRepoConf 一致）。
+struct ResolvedRepo {
+    var mainRepo: String
+    var worktreeBase: String
+    var prompt: String?
+    var auto: Bool
 }
 
 /// 本机配置，字段名与 Node 版 JSON 完全一致。
@@ -25,6 +39,14 @@ struct Config: Equatable {
     var notifySound: String = ""
     /// 空闲(无在跑/排队 review)且连上时, 检测到新版本自动更新(下载 Releases dmg 原地替换 + 重启)。默认关。
     var autoUpdate: Bool = false
+
+    // ---- v1.7: 项目自动参与 + 自动 clone + 提示词两级 ----
+    /// 自动参与服务端下发的全部受管项目(路径留空的项目首次派单时自动 clone)。false = 只参与 repos 里配置的。
+    var autoRepos: Bool = true
+    /// 默认克隆根目录：未单独配置路径的项目 clone 到 <repoBaseDir>/<owner-repo>。
+    var repoBaseDir: String = NSHomeDirectory() + "/LarkReviewRepos"
+    /// 全局 review 提示词(所有项目生效; 单项目 repos[].prompt 优先)。空 = 不启用。
+    var globalPrompt: String = ""
 
     // ---- Claude 额度(quota)相关 ----
     /// 前瞻式额度快照路径(statusline 写的 rate_limits)。默认指向标准路径(自动启用前瞻式):
@@ -44,4 +66,41 @@ struct Config: Equatable {
     var isReady: Bool { !serverUrl.isEmpty && !token.isEmpty }
 
     var heartbeatInterval: TimeInterval { Double(heartbeatMs) / 1000.0 }
+
+    // ---- v1.7 项目解析(与 Node 版 repoDirName/resolveRepoConf/effectiveRepoNames/repoParticipating 一致) ----
+
+    /// repo 目录名: owner/repo → owner-repo(全名替换分隔符, 避免不同 owner 的同名 repo 撞目录)。
+    static func repoDirName(_ repoName: String) -> String {
+        repoName.replacingOccurrences(of: #"[\\/]+"#, with: "-", options: .regularExpression)
+    }
+
+    /// 解析某项目在本机的生效路径/提示词。配置了 mainRepo = 手动模式(旧行为);
+    /// 未配置 = 自动: <repoBaseDir>/<owner-repo>; worktreeBase 缺省 = mainRepo + "-worktrees"。
+    func resolveRepo(_ repoName: String) -> ResolvedRepo {
+        let rc = repos[repoName] ?? RepoConfig()
+        let manualMain = rc.mainRepo.trimmingCharacters(in: .whitespaces)
+        let base = repoBaseDir.trimmingCharacters(in: .whitespaces).isEmpty
+            ? NSHomeDirectory() + "/LarkReviewRepos" : repoBaseDir
+        let mainRepo = manualMain.isEmpty ? base + "/" + Self.repoDirName(repoName) : manualMain
+        let wt = rc.worktreeBase.trimmingCharacters(in: .whitespaces)
+        return ResolvedRepo(
+            mainRepo: mainRepo,
+            worktreeBase: wt.isEmpty ? mainRepo + "-worktrees" : wt,
+            prompt: rc.prompt,
+            auto: manualMain.isEmpty
+        )
+    }
+
+    /// 本客户端实际参与的项目名集合: 本机 repos 配置的 ∪ (autoRepos 开启时)服务端受管清单。
+    func effectiveRepoNames(managed: [ManagedRepo]) -> [String] {
+        var names = Set(repos.keys)
+        if autoRepos { for m in managed { names.insert(m.repo) } }
+        return names.sorted()
+    }
+
+    /// 是否参与某项目(会接它的单)。
+    func participates(_ repoName: String, managed: [ManagedRepo]) -> Bool {
+        if repos[repoName] != nil { return true }
+        return autoRepos && managed.contains { $0.repo == repoName }
+    }
 }

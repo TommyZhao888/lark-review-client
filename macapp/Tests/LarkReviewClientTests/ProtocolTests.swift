@@ -216,18 +216,21 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testRenderPromptPriority() {
+        // v1.7: 提示词不含 ___RESULT___ 时自动附加结果行契约(append-only, 本体前缀原样保留)。
         let job = makeJob(promptTemplate: "server {{PR_NUM}}")
         // 本机 repo prompt 最优先
-        XCTAssertEqual(renderPrompt(job: job, worktreePath: "/wt", ciStatus: "ok", repoTemplate: "local {{PR_NUM}}"),
-                       "local 12")
+        let localP = renderPrompt(job: job, worktreePath: "/wt", ciStatus: "ok", repoTemplate: "local {{PR_NUM}}")
+        XCTAssertTrue(localP.hasPrefix("local 12"))
+        XCTAssertTrue(localP.contains("___RESULT___"), "无契约的提示词应被附加结果行契约")
         // 其次服务端下发
-        XCTAssertEqual(renderPrompt(job: job, worktreePath: "/wt", ciStatus: "ok", repoTemplate: "  "),
-                       "server 12", "空白 repoTemplate 不算数")
-        // 最后内置默认（GitHub）
+        let serverP = renderPrompt(job: job, worktreePath: "/wt", ciStatus: "ok", repoTemplate: "  ")
+        XCTAssertTrue(serverP.hasPrefix("server 12"), "空白 repoTemplate 不算数")
+        // 最后内置默认（GitHub），自带契约 → 不重复附加
         let builtin = renderPrompt(job: makeJob(), worktreePath: "/wt", ciStatus: "ok", repoTemplate: nil)
         XCTAssertTrue(builtin.contains("Run /pr-review 12 fully autonomously"))
         XCTAssertTrue(builtin.contains("/wt"))
         XCTAssertTrue(builtin.contains("Current CI status: ok."))
+        XCTAssertEqual(builtin.components(separatedBy: "___RESULT___").count - 1, 1)
     }
 
     func testRenderPromptAzdoBuiltin() {

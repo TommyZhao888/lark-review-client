@@ -55,6 +55,11 @@ struct SettingsView: View {
                 LabeledContent("客户端版本", value: "v\(CLIENT_VERSION)" +
                     (state.identity?.recommendedVersion.map { "（服务端推荐 v\($0)）" } ?? ""))
             }
+            Section("Review 用量（本机统计）") {
+                let s = UsageStore.stats()
+                LabeledContent("今日", value: UsageStore.format(s.today))
+                LabeledContent("累计", value: UsageStore.format(s.total))
+            }
         }
         .formStyle(.grouped)
     }
@@ -71,6 +76,27 @@ struct SettingsView: View {
             Section("运行") {
                 TextField("心跳间隔 (ms)", value: $draft.heartbeatMs, format: .number)
                 TextField("worktree / 日志保留天数", value: $draft.worktreeMaxAgeDays, format: .number)
+            }
+            Section("默认克隆根目录") {
+                TextField("repoBaseDir", text: $draft.repoBaseDir, prompt: Text("~/LarkReviewRepos"))
+                    .autocorrectionDisabled()
+                Text("未单独配置路径的项目自动 clone 到 该目录/owner-repo（worktree 在旁边的 …-worktrees）。改动只影响之后的自动 clone，已 clone 的项目不动。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Section("全局 Review 提示词（可选，对所有项目生效）") {
+                TextEditor(text: $draft.globalPrompt)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(minHeight: 80)
+                Text("优先级：单项目提示词 > 全局提示词 > 服务端该项目默认 > 内置默认模板。留空 = 不启用。无需自带结果行约定——客户端会自动附加（不改变提示词原意）。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("填入内置默认(GitHub)") { draft.globalPrompt = DEFAULT_PROMPT_TEMPLATE }
+                    Button("填入内置默认(ADO)") { draft.globalPrompt = DEFAULT_PROMPT_TEMPLATE_AZDO }
+                    Button("清空") { draft.globalPrompt = "" }
+                }
+                .font(.caption)
             }
             Section("通知") {
                 Toggle("桌面通知", isOn: $draft.notify)

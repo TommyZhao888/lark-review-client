@@ -74,11 +74,21 @@ final class LogStore: @unchecked Sendable {
     func writeReviewLog(job: ReviewJob, model: String, exitCode: Int32, result: ReviewResult, logText: String) -> String? {
         let stamp = isoNow().replacingOccurrences(of: ":", with: "-").replacingOccurrences(of: ".", with: "-")
         let file = reviewLogDir + "/pr-\(job.pr_num)-\(stamp).log"
-        let header =
-            "# PR #\(job.pr_num)  repo=\(job.repo)  branch=\(job.branch ?? "")\n" +
-            "# job=\(job.job_id)  model=\(model)  time=\(isoNow())\n" +
-            "# exit=\(exitCode)  verdict=\(result.verdict.isEmpty ? "-" : result.verdict)  inline=\(result.inlineCount)  general_comment=\(result.generalCommentUrl.isEmpty ? "-" : result.generalCommentUrl)\n" +
-            String(repeating: "#", count: 64) + "\n\n"
+        var uLine = ""
+        if let u = result.usage {
+            func s(_ n: Int?) -> String { n.map(String.init) ?? "?" }
+            let cost: String = u.totalCostUsd.map { String($0) } ?? "?"
+            uLine = "# tokens: in=" + s(u.inputTokens) + " out=" + s(u.outputTokens)
+                + " cache_read=" + s(u.cacheReadInputTokens) + " cache_write=" + s(u.cacheCreationInputTokens)
+                + "  cost=$" + cost + "  turns=" + s(u.numTurns) + "\n"
+        }
+        let verdict = result.verdict.isEmpty ? "-" : result.verdict
+        let gcu = result.generalCommentUrl.isEmpty ? "-" : result.generalCommentUrl
+        var header = "# PR #\(job.pr_num)  repo=\(job.repo)  branch=\(job.branch ?? "")\n"
+        header += "# job=\(job.job_id)  model=\(model)  time=\(isoNow())\n"
+        header += "# exit=\(exitCode)  verdict=\(verdict)  inline=\(result.inlineCount)  general_comment=\(gcu)\n"
+        header += uLine
+        header += String(repeating: "#", count: 64) + "\n\n"
         do {
             try (header + logText).write(toFile: file, atomically: true, encoding: .utf8)
             return file

@@ -9,28 +9,27 @@ struct ReposTab: View {
     @State private var manualRepoName = ""
 
     private var managedNames: Set<String> { Set(state.managedRepos.map(\.repo)) }
-    private var addableRepos: [ManagedRepo] {
-        state.managedRepos.filter { draft.repos[$0.repo] == nil }
+    /// 展示列表 = 受管项目全部常驻(autoRepos 下自动参与, 全空 = 全自动) + 本地多配的非受管项目。
+    private var displayNames: [String] {
+        var names = managedNames
+        names.formUnion(draft.repos.keys)
+        return names.sorted()
     }
 
     var body: some View {
         Form {
             Section {
+                Toggle("自动参与服务端下发的全部项目（路径留空的项目首次派单时自动 clone 到默认目录）",
+                       isOn: $draft.autoRepos)
+                Text("清单由管理员在服务端配置并下发；实际是否派单给你由服务端候选池决定。每个项目的路径和提示词都可留空：路径留空 = 自动 clone 到默认克隆根目录；填了路径 = 用你指定的本机 clone（与旧版行为一致）。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 if state.managedRepos.isEmpty {
                     Text(state.isRegistered
                          ? "服务端暂无受管项目"
                          : "连上服务端后这里会显示可参与的项目清单")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                }
-                if !addableRepos.isEmpty {
-                    Menu("＋ 从服务端清单添加项目") {
-                        ForEach(addableRepos) { r in
-                            Button("\(r.repo)\(r.provider == "azdo" ? "  (Azure DevOps)" : "")") {
-                                draft.repos[r.repo] = RepoConfig(mainRepo: "", worktreeBase: "")
-                            }
-                        }
-                    }
                 }
                 // 旧服务端兼容：手动添加 owner/repo
                 HStack {
@@ -39,19 +38,20 @@ struct ReposTab: View {
                     Button("添加") {
                         let name = manualRepoName.trimmingCharacters(in: .whitespaces)
                         guard !name.isEmpty, draft.repos[name] == nil else { return }
-                        draft.repos[name] = RepoConfig(mainRepo: "", worktreeBase: "")
+                        draft.repos[name] = RepoConfig()
                         manualRepoName = ""
                     }
                     .disabled(manualRepoName.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
 
-            ForEach(draft.repos.keys.sorted(), id: \.self) { name in
+            ForEach(displayNames, id: \.self) { name in
                 Section {
                     RepoEditor(
                         name: name,
                         managed: state.managedRepos.first { $0.repo == name },
                         isManaged: managedNames.isEmpty || managedNames.contains(name),
+                        autoPath: draft.resolveRepo(name).mainRepo,
                         repo: bindingFor(name),
                         onRemove: { draft.repos.removeValue(forKey: name) }
                     )
@@ -63,8 +63,15 @@ struct ReposTab: View {
 
     private func bindingFor(_ name: String) -> Binding<RepoConfig> {
         Binding(
-            get: { draft.repos[name] ?? RepoConfig(mainRepo: "", worktreeBase: "") },
-            set: { draft.repos[name] = $0 }
+            get: { draft.repos[name] ?? RepoConfig() },
+            set: { newValue in
+                // 受管项目三项全空 = 全自动, 不落草稿(保存时也不落盘); 非受管保留占位以维持参与。
+                if newValue.isEmpty, managedNames.contains(name) {
+                    draft.repos.removeValue(forKey: name)
+                } else {
+                    draft.repos[name] = newValue
+                }
+            }
         )
     }
 }
@@ -73,6 +80,7 @@ private struct RepoEditor: View {
     let name: String
     let managed: ManagedRepo?
     let isManaged: Bool
+    let autoPath: String
     @Binding var repo: RepoConfig
     let onRemove: () -> Void
 
@@ -93,14 +101,18 @@ private struct RepoEditor: View {
                     .background(.orange.opacity(0.2), in: Capsule())
             }
             Spacer()
-            Button(role: .destructive) { onRemove() } label: {
-                Image(systemName: "trash")
+            if managed == nil || !repo.isEmpty {
+                Button(role: .destructive) { onRemove() } label: {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help(managed == nil ? "删除该项目" : "清除本机覆盖（回到全自动）")
             }
-            .buttonStyle(.borderless)
         }
 
         HStack {
-            TextField("本机主仓路径 (mainRepo)", text: $repo.mainRepo, prompt: Text("/Users/you/code/repo"))
+            TextField("本机主仓路径 (mainRepo)，留空 = 自动", text: $repo.mainRepo,
+                      prompt: Text("留空 = " + autoPath))
                 .autocorrectionDisabled()
             Button("选择…") {
                 let panel = NSOpenPanel()
@@ -114,7 +126,7 @@ private struct RepoEditor: View {
         }
         TextField("worktree 根目录（留空自动用 <mainRepo>-worktrees）",
                   text: $repo.worktreeBase,
-                  prompt: Text(repo.mainRepo.isEmpty ? "留空自动补全" : repo.mainRepo + "-worktrees"))
+                  prompt: Text("留空自动补全"))
             .autocorrectionDisabled()
 
         DisclosureGroup("本机提示词覆盖（可选）", isExpanded: $showPrompt) {

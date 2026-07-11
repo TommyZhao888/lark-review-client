@@ -15,6 +15,9 @@ final class WebSocketClient: NSObject {
     var onRegisterReject: ((String) -> Void)?
     var onReviewJob: ((ReviewJob) -> Void)?
     var onPrClosed: ((PrClosed) -> Void)?
+    var onReviewResultAck: ((String) -> Void)?
+    /// 本客户端实际参与的项目列表(本机配置 ∪ autoRepos 下的受管清单; AppRuntime 接线)。
+    var effectiveRepos: () -> [String] = { [] }
     var onStateChange: ((AppState.ConnectionState) -> Void)?
     var onDisconnected: ((_ everRegistered: Bool) -> Void)?
     /// 每个收/发的原始文本帧（outbound = client→server），供 WS 消息日志。
@@ -84,8 +87,13 @@ final class WebSocketClient: NSObject {
     }
 
     func send(_ msg: OutboundMessage) {
-        guard let task, connected else { return }
         guard let text = try? msg.encodedString() else { return }
+        sendRaw(text)
+    }
+
+    /// 发送原始 JSON 文本帧(ResultOutbox 补投已序列化的结果用; 未连接时静默丢弃, 靠重发闭环)。
+    func sendRaw(_ text: String) {
+        guard let task, connected else { return }
         onFrame?(true, text)
         let myEpoch = epoch
         task.send(.string(text)) { [weak self] error in
@@ -94,6 +102,37 @@ final class WebSocketClient: NSObject {
                 guard let self, self.epoch == myEpoch else { return }
                 self.handleDisconnect()
             }
+        }
+    }
+
+    var isRegistered: Bool { registered }
+
+    /// 上次注册时上报的 repo 列表; 受管清单变化(register_ack/repos_updated)后与最新参与列表比对,
+    /// 不一致则重发 register(hub 幂等: 同 open_id 重发直接替换记录, 在途 job 由 hub 从全局重建)。
+    private var lastSentRepos: [String] = []
+
+    func reRegisterIfReposChanged(reason: String) {
+        guard connected else { return }
+        let now = effectiveRepos()
+        guard now != lastSentRepos else { return }
+        LogStore.shared.log("参与项目列表变化(\(reason)) → 重新注册: [\(now.joined(separator: ", "))]")
+        sendRegister()
+    }
+
+    private func sendRegister() {
+        let myEpoch = epoch
+        Task { @MainActor [weak self] in
+            guard let self, self.epoch == myEpoch else { return }
+            let hostname = await detectHostname()
+            guard self.epoch == myEpoch else { return }
+            self.lastSentRepos = self.effectiveRepos()
+            self.send(.register(
+                token: self.config.token,
+                hostname: hostname,
+                repos: self.lastSentRepos,
+                version: CLIENT_VERSION,
+                quota: QuotaMonitor.shared.current(config: self.config)
+            ))
         }
     }
 
@@ -138,23 +177,12 @@ final class WebSocketClient: NSObject {
     }
 
     /// URLSessionWebSocketDelegate didOpen 触发：发 register + 起心跳/ping。
+    /// repos = 本机配置 ∪ autoRepos 下的受管清单(含本地缓存, 重启后首连即完整)。
     private func handleOpen() {
         reconnectDelay = 1.0
         connected = true
         onStateChange?(.connected)
-        let myEpoch = epoch
-        Task { @MainActor [weak self] in
-            guard let self, self.epoch == myEpoch else { return }
-            let hostname = await detectHostname()
-            guard self.epoch == myEpoch else { return }
-            self.send(.register(
-                token: self.config.token,
-                hostname: hostname,
-                repos: Array(self.config.repos.keys),
-                version: CLIENT_VERSION,
-                quota: QuotaMonitor.shared.current(config: self.config)
-            ))
-        }
+        sendRegister()
         startHeartbeat()
         startPing()
     }
@@ -231,6 +259,10 @@ final class WebSocketClient: NSObject {
 
         case .prClosed(let pc):
             onPrClosed?(pc)
+
+        case .reviewResultAck(let ack):
+            // hub 确认收到某条 review 结果(含 job 已 finish 的幂等分支)→ 从 pending 队列清除。
+            if let jobId = ack.job_id { onReviewResultAck?(jobId) }
         }
     }
 

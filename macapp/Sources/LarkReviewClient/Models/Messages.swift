@@ -27,11 +27,13 @@ enum OutboundMessage {
         case let .reviewProgress(jobId, stage):
             return ["type": "review_progress", "job_id": jobId, "stage": stage]
         case let .reviewResult(jobId, r):
-            return ["type": "review_result", "job_id": jobId,
+            var obj: [String: Any] = ["type": "review_result", "job_id": jobId,
                     "exit_code": r.exitCode, "log_tail": r.logTail,
                     "result_line": r.resultLine, "verdict": r.verdict,
                     "general_comment_url": r.generalCommentUrl, "inline_count": r.inlineCount,
                     "quota": r.quota.jsonObject, "declined_quota": r.declinedQuota]
+            if let u = r.usage { obj["usage"] = u.jsonObject }   // token 用量(v1.7+; 无则不带, 旧 hub 兼容)
+            return obj
         case let .reconnected(wasBusy, repo, prNum):
             return ["type": "reconnected", "was_busy": wasBusy, "repo": repo,
                     "pr_num": prNum.map { $0 as Any } ?? ""]
@@ -41,6 +43,29 @@ enum OutboundMessage {
     func encodedString() throws -> String {
         let data = try JSONSerialization.data(withJSONObject: jsonObject, options: [.sortedKeys])
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+}
+
+/// 一次 review 的 token 用量(claude --output-format json 信封的 usage 摘要; 与 Node 版字段一致)。
+struct ReviewUsage: Codable, Equatable {
+    var inputTokens: Int?
+    var outputTokens: Int?
+    var cacheReadInputTokens: Int?
+    var cacheCreationInputTokens: Int?
+    var totalCostUsd: Double?
+    var durationMs: Int?
+    var numTurns: Int?
+
+    var jsonObject: [String: Any] {
+        var o: [String: Any] = [:]
+        o["input_tokens"] = inputTokens ?? NSNull()
+        o["output_tokens"] = outputTokens ?? NSNull()
+        o["cache_read_input_tokens"] = cacheReadInputTokens ?? NSNull()
+        o["cache_creation_input_tokens"] = cacheCreationInputTokens ?? NSNull()
+        o["total_cost_usd"] = totalCostUsd ?? NSNull()
+        o["duration_ms"] = durationMs ?? NSNull()
+        o["num_turns"] = numTurns ?? NSNull()
+        return o
     }
 }
 
@@ -57,6 +82,8 @@ struct ReviewResult: Equatable {
     var quota: QuotaStatus = QuotaStatus()
     /// 派活前自查额度不足 → 拒接本单(未跑 review), 交服务端改派。
     var declinedQuota: Bool = false
+    /// token 用量(nil = 本机 claude 不支持 json 输出), 服务端记账用。
+    var usage: ReviewUsage?
 }
 
 // ---------- 入站 ----------
@@ -109,6 +136,11 @@ struct PrClosed: Codable {
     var pr_num: Int
 }
 
+/// hub 对 review_result 的回执(v1.7+): 客户端收到才把该结果从磁盘 pending 队列删除。
+struct ReviewResultAck: Codable {
+    var job_id: String?
+}
+
 /// 宽容解码 Int：服务端（JS 无类型）对 pr_num 等字段可能发数字也可能发字符串
 /// （生产实测 review_job.pr_num 为 "593" 字符串），两种都必须接受。
 private func decodeLenientInt<K: CodingKey>(
@@ -152,6 +184,7 @@ enum InboundMessage {
     case registerReject(RegisterReject)
     case reviewJob(ReviewJob)
     case prClosed(PrClosed)
+    case reviewResultAck(ReviewResultAck)
 
     /// 解析入站帧。JSON 非法 / type 未知返回 nil（对齐 Node：静默丢弃）。
     /// 已知类型但载荷解码失败也返回 nil，但会调用 onDecodeFailure——
@@ -177,6 +210,7 @@ enum InboundMessage {
         case "register_reject": return decode(RegisterReject.self) { .registerReject($0) }
         case "review_job":      return decode(ReviewJob.self) { .reviewJob($0) }
         case "pr_closed":       return decode(PrClosed.self) { .prClosed($0) }
+        case "review_result_ack": return decode(ReviewResultAck.self) { .reviewResultAck($0) }
         default:                return nil
         }
     }

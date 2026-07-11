@@ -191,8 +191,10 @@ async function ensureRepoCloned(job, mainRepo) {
   }
   if (r.code !== 0) {
     rmPartial();
-    return { ok: false, detail: `自动 clone 失败(${url}):\n${((r.stdout || '') + (r.stderr || '')).slice(-1500)}\n` +
-      `请确认本机对该仓库有访问权限(github 需 gh auth login; ADO 需 git 凭证), 或手动 clone 后在配置页为该项目填写本机路径。` };
+    const errTail = ((r.stdout || '') + (r.stderr || '')).slice(-1500);
+    logErr(`auto-clone ${job.repo} 失败(exit=${r.code}): ${errTail.slice(-300).replace(/\n/g, ' ')}`);
+    return { ok: false, detail: `自动 clone 失败(${url}):\n${errTail}\n` +
+      `请确认本机对该仓库有访问权限(github 需 gh auth login; ADO 需 AZURE_DEVOPS_EXT_PAT 或 git 凭证), 或手动 clone 后在配置页为该项目填写本机路径。` };
   }
   log(`auto-clone ${job.repo} 完成`);
   return { ok: true, cloned: true };
