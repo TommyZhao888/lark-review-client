@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.8.0';
+const CLIENT_VERSION = '1.8.1';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -590,8 +590,12 @@ function run(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { ...opts });
     let stdout = '', stderr = '';
-    let timedOut = false, killTimer = null, graceTimer = null;
-    const clearTimers = () => { if (killTimer) clearTimeout(killTimer); if (graceTimer) clearTimeout(graceTimer); };
+    let timedOut = false, killTimer = null, graceTimer = null, drainGraceTimer = null, settled = false;
+    const clearTimers = () => {
+      if (killTimer) clearTimeout(killTimer);
+      if (graceTimer) clearTimeout(graceTimer);
+      if (drainGraceTimer) clearTimeout(drainGraceTimer);
+    };
     // 可选逐行回调(opts.onLine): 边读 stdout 边按 \n 切行回调, 供 stream-json 流式展示; 同时仍累积完整 stdout。
     let lineBuf = '';
     if (child.stdout) child.stdout.on('data', (d) => {
@@ -616,8 +620,9 @@ function run(cmd, args, opts = {}) {
         graceTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 8000);
       }, timeoutMs);
     }
-    child.on('error', (e) => { clearTimers(); resolve({ code: 127, stdout, stderr: stderr + e.message }); });
-    child.on('close', (code) => {
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
       clearTimers();
       // flush 最后一行(可能无结尾换行)
       if (typeof opts.onLine === 'function' && lineBuf.trim()) { try { opts.onLine(lineBuf); } catch { /* ignore */ } }
@@ -626,7 +631,20 @@ function run(cmd, args, opts = {}) {
       } else {
         resolve({ code: code == null ? 1 : code, stdout, stderr });
       }
+    };
+    child.on('error', (e) => { if (settled) return; settled = true; clearTimers(); resolve({ code: 127, stdout, stderr: stderr + e.message }); });
+    // 'exit' = 主进程已退出(不等 stdio 关闭)。给 stdio 3s 宽限自然 close; 到点仍没 close 说明 claude 派生的
+    // 子孙进程(如配置里的 MCP server)占着管道写端 → 'close' 永不触发 → 任务卡死。此时销毁流并强制收尾。
+    // 主进程的输出在它退出前都已通过 data 事件收妥, 丢弃的只是残留子孙的无关输出。与 macapp 排空宽限对齐。
+    child.on('exit', (code) => {
+      if (settled) return;
+      drainGraceTimer = setTimeout(() => {
+        try { if (child.stdout) child.stdout.destroy(); } catch { /* ignore */ }
+        try { if (child.stderr) child.stderr.destroy(); } catch { /* ignore */ }
+        finish(code);
+      }, 3000);
     });
+    child.on('close', (code) => finish(code));   // 正常: stdio 都关了 → 立即收尾(会清 drainGrace 定时器)
   });
 }
 

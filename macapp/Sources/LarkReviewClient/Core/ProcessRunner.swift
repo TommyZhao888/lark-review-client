@@ -121,7 +121,7 @@ enum ProcessRunner {
 
         // 并发排空两条输出管道，然后等退出。stdout 若给了 onOutputLine 则边读边按行回调(流式)。
         async let outData = drainOut(outPipe, onLine: onOutputLine)
-        async let errData = drain(errPipe)
+        async let errData = drainOut(errPipe, onLine: nil)
         let code: Int32 = await withCheckedContinuation { cont in
             DispatchQueue.global().async {
                 p.waitUntilExit()
@@ -129,8 +129,18 @@ enum ProcessRunner {
             }
         }
         timeoutWork?.cancel()
+        // 主进程已退出: 给管道排空一个宽限期(3s), 到点强关读端解除阻塞。claude 可能派生了不随它退出的
+        // 子孙进程(如配置里的 MCP server), 它们继承并占着 stdout/stderr 管道写端 → EOF 永不到达 →
+        // 排空永久卡住 → 整个 review 任务卡死不收尾(超时 SIGKILL 了 claude 也一样卡, 残留子孙仍占管道)。
+        // 主进程的输出在它退出前已写入管道, 强关只丢弃残留子孙的无关输出。
+        let graceClose = DispatchWorkItem {
+            try? outPipe.fileHandleForReading.close()
+            try? errPipe.fileHandleForReading.close()
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3, execute: graceClose)
         let stdout = String(data: await outData, encoding: .utf8) ?? ""
         let stderr = String(data: await errData, encoding: .utf8) ?? ""
+        graceClose.cancel()
         if timedOut.isSet {
             let note = "[client] 超时(\(timeoutMs / 1000)s)已终止子进程"
             return ProcessResult(code: 124, stdout: stdout, stderr: stderr.isEmpty ? note : stderr + "\n" + note)
@@ -138,40 +148,31 @@ enum ProcessRunner {
         return ProcessResult(code: code, stdout: stdout, stderr: stderr)
     }
 
-    private static func drain(_ pipe: Pipe) async -> Data {
-        await withCheckedContinuation { cont in
-            DispatchQueue.global().async {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                cont.resume(returning: data)
-            }
-        }
-    }
-
-    /// 有 onLine 则流式排空(边读边按行回调), 否则退回一次性读到 EOF。
+    /// 排空管道: 边读边(可选)按 \n 回调 onLine, 累积完整数据返回。
+    /// 用可抛的 read(upToCount:) 而非 readDataToEndOfFile —— 这样外部在排空宽限到点后 close 读端时,
+    /// 阻塞中的读会抛错中断(而不是永久卡死或抛不可捕获的 ObjC 异常)。
     private static func drainOut(_ pipe: Pipe, onLine: (@Sendable (String) -> Void)?) async -> Data {
-        if let onLine { return await drainStreaming(pipe, onLine: onLine) }
-        return await drain(pipe)
-    }
-
-    /// 流式排空: 边读边按 \n 切行回调 onLine, 同时累积完整数据返回(供最终解析/兜底)。
-    private static func drainStreaming(_ pipe: Pipe, onLine: @escaping @Sendable (String) -> Void) async -> Data {
         await withCheckedContinuation { cont in
             DispatchQueue.global().async {
                 let fh = pipe.fileHandleForReading
                 var acc = Data()
                 var lineBuf = Data()
                 while true {
-                    let chunk = fh.availableData
-                    if chunk.isEmpty { break }   // EOF
+                    let chunk: Data?
+                    do { chunk = try fh.read(upToCount: 65536) }
+                    catch { break }                                  // 读端被关 → 中断
+                    guard let chunk, !chunk.isEmpty else { break }   // nil = EOF
                     acc.append(chunk)
-                    lineBuf.append(chunk)
-                    while let nl = lineBuf.firstIndex(of: 0x0A) {
-                        let lineData = lineBuf.subdata(in: lineBuf.startIndex..<nl)
-                        lineBuf.removeSubrange(lineBuf.startIndex...nl)
-                        if let s = String(data: lineData, encoding: .utf8), !s.isEmpty { onLine(s) }
+                    if let onLine {
+                        lineBuf.append(chunk)
+                        while let nl = lineBuf.firstIndex(of: 0x0A) {
+                            let lineData = lineBuf.subdata(in: lineBuf.startIndex..<nl)
+                            lineBuf.removeSubrange(lineBuf.startIndex...nl)
+                            if let s = String(data: lineData, encoding: .utf8), !s.isEmpty { onLine(s) }
+                        }
                     }
                 }
-                if let s = String(data: lineBuf, encoding: .utf8),
+                if let onLine, let s = String(data: lineBuf, encoding: .utf8),
                    !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { onLine(s) }
                 cont.resume(returning: acc)
             }

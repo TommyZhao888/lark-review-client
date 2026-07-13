@@ -55,6 +55,33 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertEqual(r.stdout, "a\nb\nc\n")   // 完整 stdout 仍照常累积返回
     }
 
+    func testReturnsPromptlyWhenChildLeaksPipe() async {
+        // sh 派生一个后台 sleep(继承 stdout), 打印 done 后自己退出; 后台 sleep 继续占着管道写端 8s。
+        // 复现"claude 主进程退出但 MCP 等子孙进程占着管道 → 任务永不收尾"。
+        // 修复前: readDataToEndOfFile 等到 sleep 结束(~8s)才返回; 修复后: 主进程退出后 3s 宽限强关管道即返回。
+        let start = Date()
+        let r = await ProcessRunner.run("/bin/sh", ["-c", "sleep 8 & echo done"])
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertEqual(r.code, 0)
+        XCTAssertTrue(r.stdout.contains("done"), "主进程退出前的输出必须完整拿到: \(r.stdout)")
+        XCTAssertLessThan(elapsed, 6, "主进程退出后应在排空宽限期内返回, 不等残留子进程(实测 \(elapsed)s)")
+    }
+
+    func testTerminateReturnsPromptlyEvenIfChildLeaksPipe() async {
+        // 复现"点终止后卡在'终止中'": 主进程被 terminate 杀掉, 但它派生的后台进程(模拟 MCP server)
+        // 继承并占着 stdout。修复前 run 会一直等 EOF → 不返回 → cancelling 永不复位; 修复后主进程一死,
+        // 排空宽限到点强关管道, run 及时返回, 任务收尾, 按钮复位。
+        let handle = ProcHandle()
+        let start = Date()
+        async let result = ProcessRunner.run("/bin/sh", ["-c", "sleep 30 & echo running; sleep 30"], handle: handle)
+        try? await Task.sleep(for: .milliseconds(500))
+        handle.terminate()
+        let r = await result
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertNotEqual(r.code, 0, "被终止的进程退出码不应为 0")
+        XCTAssertLessThan(elapsed, 12, "终止后应在(信号 + 排空宽限)内返回, 不卡死: \(elapsed)s")
+    }
+
     func testCommandNotFoundReturns127() async {
         let r = await ProcessRunner.run("/nonexistent/definitely-not-a-cmd", [])
         XCTAssertEqual(r.code, 127)
