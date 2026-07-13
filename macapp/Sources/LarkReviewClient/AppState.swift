@@ -41,6 +41,8 @@ final class AppState {
     var updatePhase: UpdatePhase = .idle
     var managedRepos: [ManagedRepo] = []
     var runningJob: RunningJob?
+    /// 用户已请求终止当前 review(菜单栏据此显示「终止中…」并禁用按钮)。
+    var cancelling: Bool = false
     var queuedJobs: [(repo: String, prNum: Int)] = []
     var config: Config = Config()
     /// 运行日志内存镜像（供 LogsView 实时显示）。

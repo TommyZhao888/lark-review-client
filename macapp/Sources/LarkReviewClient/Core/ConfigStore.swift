@@ -27,6 +27,7 @@ enum ConfigStore {
         if let cp = obj["claudePath"] as? String, !cp.isEmpty { cfg.claudePath = cp }
         if let hb = obj["heartbeatMs"] as? Int, hb > 0 { cfg.heartbeatMs = hb }
         if let d = obj["worktreeMaxAgeDays"] as? Int, d > 0 { cfg.worktreeMaxAgeDays = d }
+        if let t = obj["reviewTimeoutMs"] as? Int, t >= 0 { cfg.reviewTimeoutMs = t }
         if let n = obj["notify"] as? Bool { cfg.notify = n }
         if let s = obj["notifySound"] as? String { cfg.notifySound = s }
         if let a = obj["autoUpdate"] as? Bool { cfg.autoUpdate = a }
@@ -71,6 +72,7 @@ enum ConfigStore {
         cur["reviewModel"] = model.isEmpty ? "claude-opus-4-8" : model
         cur["worktreeMaxAgeDays"] = cfg.worktreeMaxAgeDays > 0 ? cfg.worktreeMaxAgeDays : 14
         cur["heartbeatMs"] = cfg.heartbeatMs > 0 ? cfg.heartbeatMs : 15000
+        cur["reviewTimeoutMs"] = cfg.reviewTimeoutMs >= 0 ? cfg.reviewTimeoutMs : 1800000
         cur["notify"] = cfg.notify
         cur["autoUpdate"] = cfg.autoUpdate
         cur["autoRepos"] = cfg.autoRepos

@@ -89,6 +89,27 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertNil(repo["prompt"], "空白 prompt 不落盘")
     }
 
+    func testReviewTimeoutDefaultAndRoundTrip() throws {
+        // 缺省: 默认 30min = 1800000ms; 分钟换算正确
+        let cfg0 = ConfigStore.load()
+        XCTAssertEqual(cfg0.reviewTimeoutMs, 1800000)
+        XCTAssertEqual(cfg0.reviewTimeoutMinutes, 30)
+
+        var cfg = Config()
+        cfg.serverUrl = "wss://x"
+        cfg.token = "t"
+        cfg.reviewTimeoutMinutes = 45
+        XCTAssertEqual(cfg.reviewTimeoutMs, 45 * 60000)
+        try ConfigStore.save(cfg)
+        XCTAssertEqual(ConfigStore.load().reviewTimeoutMs, 45 * 60000)
+
+        // 0 = 不限时, 必须能持久化并读回(不能被当作"未设置"退回默认)
+        cfg.reviewTimeoutMinutes = 0
+        XCTAssertEqual(cfg.reviewTimeoutMs, 0)
+        try ConfigStore.save(cfg)
+        XCTAssertEqual(ConfigStore.load().reviewTimeoutMs, 0)
+    }
+
     func testSaveToNewFile() throws {
         var cfg = Config()
         cfg.serverUrl = "wss://x"

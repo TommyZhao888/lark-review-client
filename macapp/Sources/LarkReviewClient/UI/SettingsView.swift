@@ -76,6 +76,10 @@ struct SettingsView: View {
             Section("运行") {
                 TextField("心跳间隔 (ms)", value: $draft.heartbeatMs, format: .number)
                 TextField("worktree / 日志保留天数", value: $draft.worktreeMaxAgeDays, format: .number)
+                TextField("Review 超时 (分钟, 0 = 不限时)", value: $draft.reviewTimeoutMinutes, format: .number)
+                Text("单次 review 的 claude 执行超过此时长自动终止并按失败上报(交服务端改派), 避免卡死占住队列。0 = 不限时(旧行为)。运行期间「运行日志」每 30s 会打一条进度心跳。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             Section("默认克隆根目录") {
                 TextField("repoBaseDir", text: $draft.repoBaseDir, prompt: Text("~/LarkReviewRepos"))

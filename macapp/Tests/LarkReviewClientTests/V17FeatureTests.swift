@@ -42,6 +42,25 @@ final class V17FeatureTests: XCTestCase {
         XCTAssertTrue(cfg.participates("local/one", managed: managed))
     }
 
+    func testUnmanagedLocalRepoNotReported() {
+        // 本机残留一个服务端未受管的项目(如历史示例/旧配置遗留的 Liontrip-Global-App-Next)。
+        var cfg = Config()
+        cfg.repos["ghost/leftover"] = RepoConfig(mainRepo: "/g", worktreeBase: "")
+        let managed = [ManagedRepo(repo: "srv/a")]
+        // 有服务端清单时: 未受管的本地项目既不上报也不参与(服务端权威)。
+        XCTAssertEqual(cfg.effectiveRepoNames(managed: managed), ["srv/a"])
+        XCTAssertFalse(cfg.participates("ghost/leftover", managed: managed))
+        XCTAssertTrue(cfg.participates("srv/a", managed: managed))
+        // autoRepos=false: 仅参与"受管 ∩ 本机配置", 未受管本地项目照样被挡。
+        cfg.autoRepos = false
+        XCTAssertEqual(cfg.effectiveRepoNames(managed: managed), [])
+        XCTAssertFalse(cfg.participates("ghost/leftover", managed: managed))
+        // 无服务端清单(旧服务端/尚未收到): 回退旧行为, 本机配置的仍参与(兼容手动配置)。
+        cfg.autoRepos = true
+        XCTAssertEqual(cfg.effectiveRepoNames(managed: []), ["ghost/leftover"])
+        XCTAssertTrue(cfg.participates("ghost/leftover", managed: []))
+    }
+
     // ---------- clone URL 推导 ----------
 
     func testDeriveCloneUrl() {

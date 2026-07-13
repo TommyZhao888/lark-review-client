@@ -278,6 +278,7 @@ final class AppRuntime {
 
         reviews.onJobFinish = { [state, notifications] job, result in
             state.runningJob = nil
+            state.cancelling = false
             if result.exitCode == 0, !result.verdict.isEmpty {
                 var uNote = ""
                 if let u = result.usage, let outTok = u.outputTokens {
@@ -291,6 +292,10 @@ final class AppRuntime {
 
         reviews.onQueueChange = { [state] queue in
             state.queuedJobs = queue.map { (repo: $0.repo, prNum: $0.pr_num) }
+        }
+
+        reviews.onCancelChange = { [state] cancelling in
+            state.cancelling = cancelling
         }
     }
 }

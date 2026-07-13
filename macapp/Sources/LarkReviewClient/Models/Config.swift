@@ -1,7 +1,7 @@
 import Foundation
 
 /// 客户端版本：升级功能时手动 +1（与 Info.plist 保持一致）。服务端据此判断是否提示升级。
-let CLIENT_VERSION = "1.7.0"
+let CLIENT_VERSION = "1.8.0"
 
 /// 单个 repo 的本机配置（~/.lark-review-client.json 的 repos["owner/repo"]）。
 /// v1.7 起路径均可留空 = 自动模式（clone 到 repoBaseDir/<owner-repo>）。
@@ -35,6 +35,9 @@ struct Config: Equatable {
     var claudePath: String = "claude"
     var heartbeatMs: Int = 15000
     var worktreeMaxAgeDays: Int = 14
+    /// 单次 review 的 claude 执行超时(ms): 超时自动终止并按失败上报(交服务端改派), 避免卡死占住队列。
+    /// 默认 30min; 0 = 不限时(旧行为)。与 Node cfg.reviewTimeoutMs 对齐。
+    var reviewTimeoutMs: Int = 1800000
     var notify: Bool = true
     var notifySound: String = ""
     /// 空闲(无在跑/排队 review)且连上时, 检测到新版本自动更新(下载 Releases dmg 原地替换 + 重启)。默认关。
@@ -67,6 +70,12 @@ struct Config: Equatable {
 
     var heartbeatInterval: TimeInterval { Double(heartbeatMs) / 1000.0 }
 
+    /// 设置页以「分钟」编辑超时(内部仍存 ms)。0 = 不限时。
+    var reviewTimeoutMinutes: Int {
+        get { reviewTimeoutMs / 60000 }
+        set { reviewTimeoutMs = max(0, newValue) * 60000 }
+    }
+
     // ---- v1.7 项目解析(与 Node 版 repoDirName/resolveRepoConf/effectiveRepoNames/repoParticipating 一致) ----
 
     /// repo 目录名: owner/repo → owner-repo(全名替换分隔符, 避免不同 owner 的同名 repo 撞目录)。
@@ -91,16 +100,22 @@ struct Config: Equatable {
         )
     }
 
-    /// 本客户端实际参与的项目名集合: 本机 repos 配置的 ∪ (autoRepos 开启时)服务端受管清单。
+    /// 本客户端实际参与(会被派单/上报)的项目名集合。服务端受管清单为权威:
+    /// - 有清单时: autoRepos → 全部受管项目; 否则 → 受管 ∩ 本机配置(手动 opt-in 子集)。
+    ///   本机多配的、服务端未受管的项目【不参与、也不上报】——避免把无关项目 advertise 给服务端。
+    /// - 无清单时(旧服务端 / 尚未收到 register_ack): 回退旧行为, 本机配置的都算(兼容手动配置)。
     func effectiveRepoNames(managed: [ManagedRepo]) -> [String] {
-        var names = Set(repos.keys)
-        if autoRepos { for m in managed { names.insert(m.repo) } }
-        return names.sorted()
+        let managedNames = Set(managed.map(\.repo))
+        if managedNames.isEmpty { return repos.keys.sorted() }
+        if autoRepos { return managedNames.sorted() }
+        return managedNames.intersection(repos.keys).sorted()
     }
 
-    /// 是否参与某项目(会接它的单)。
+    /// 是否参与某项目(会接它的单)。服务端受管清单为权威(语义同 effectiveRepoNames)。
     func participates(_ repoName: String, managed: [ManagedRepo]) -> Bool {
-        if repos[repoName] != nil { return true }
-        return autoRepos && managed.contains { $0.repo == repoName }
+        let managedNames = Set(managed.map(\.repo))
+        if managedNames.isEmpty { return repos[repoName] != nil }
+        guard managedNames.contains(repoName) else { return false }
+        return autoRepos || repos[repoName] != nil
     }
 }

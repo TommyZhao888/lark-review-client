@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.7.0';
+const CLIENT_VERSION = '1.8.0';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -68,6 +68,9 @@ function loadConfig() {
   cfg.worktreeMaxAgeDays = cfg.worktreeMaxAgeDays || 14;
   cfg.claudePath = cfg.claudePath || 'claude';
   cfg.configPort = cfg.configPort || 8790;   // 本机配置页端口
+  // review 超时(ms): 单次 claude 执行超过此时长自动终止并上报失败(交服务端改派), 避免卡死占住队列。
+  // 默认 30min; 显式设 0 = 不限时(旧行为)。与 macapp reviewTimeoutMs 对齐。
+  cfg.reviewTimeoutMs = (typeof cfg.reviewTimeoutMs === 'number' && cfg.reviewTimeoutMs >= 0) ? cfg.reviewTimeoutMs : 1800000;
   // ---- Claude 额度(quota)相关 ----
   // 前瞻式: 读一个由 statusline 写的 rate_limits 快照(claude-hud 或本仓库 statusline-quota.sh)。
   // headless(--print)不触发 statusline, 故快照仅在本机【交互使用 Claude】时刷新; 限额是账号级的,
@@ -115,11 +118,16 @@ function saveManagedCache(list) {
   } catch (e) { logErr('saveManagedCache:', e.message); }
 }
 
-// 本客户端实际参与的项目名集合: 本机 repos 里配置的 ∪ (autoRepos 开启时)服务端受管清单。
+// 本客户端实际参与(会被派单/上报)的项目名集合。服务端受管清单为权威:
+//  - 有清单时: autoRepos → 全部受管项目; 否则 → 受管 ∩ 本机配置(手动 opt-in 子集)。
+//    本机多配的、服务端未受管的项目【不参与、也不上报】—— 避免把无关项目 advertise 给服务端。
+//  - 无清单时(旧服务端 / 尚未收到 register_ack): 回退旧行为, 本机配置的都算(兼容手动配置)。
 function effectiveRepoNames() {
-  const names = new Set(Object.keys(cfg.repos || {}));
-  if (cfg.autoRepos) for (const r of managedRepos) if (r && r.repo) names.add(r.repo);
-  return [...names];
+  const managedNames = new Set(managedRepos.filter((r) => r && r.repo).map((r) => r.repo));
+  const localNames = Object.keys(cfg.repos || {});
+  if (managedNames.size === 0) return localNames.sort();
+  if (cfg.autoRepos) return [...managedNames].sort();
+  return localNames.filter((n) => managedNames.has(n)).sort();
 }
 
 // repo 目录名: owner/repo → owner-repo(全名替换分隔符, 避免不同 owner 的同名 repo 撞目录)。
@@ -135,10 +143,12 @@ function resolveRepoConf(repoName) {
   return { mainRepo, worktreeBase, prompt: rc.prompt || '', auto: !manualMain };
 }
 
-// 是否参与某项目(会接它的单): 本机配置过, 或 autoRepos 且在服务端受管清单里。
+// 是否参与某项目(会接它的单)。服务端受管清单为权威(语义同 effectiveRepoNames)。
 function repoParticipating(repoName) {
-  if ((cfg.repos || {})[repoName]) return true;
-  return !!(cfg.autoRepos && managedRepos.some((r) => r && r.repo === repoName));
+  const managedNames = new Set(managedRepos.filter((r) => r && r.repo).map((r) => r.repo));
+  if (managedNames.size === 0) return !!(cfg.repos || {})[repoName];   // 旧服务端/未收到清单: 回退旧行为
+  if (!managedNames.has(repoName)) return false;                       // 服务端未受管 → 绝不参与
+  return !!(cfg.autoRepos || (cfg.repos || {})[repoName]);
 }
 
 // 从 review_job 推导仓库远端地址(自动 clone 用):
@@ -209,6 +219,7 @@ async function ensureRepoCloned(job, mainRepo) {
 // currentQuota() 汇总两者交给服务端; reset 到点自动恢复可用。
 
 let reactiveQuotaBlock = null;   // {reason, reset_at(ms)} —— 命中限额后置; 到 reset_at 自动失效
+let streamJsonSupported = null;  // 本机 claude 是否支持 stream-json(null=未知; 首次没拿到 result 事件 → false 走 json)
 
 // 从 claude 输出解析限额命中。命中→{reason, reset_at}; 未命中→null。
 // 文案形如: "You've hit your session limit · resets 3:45pm" / "...weekly limit · resets Mon 12:00am"
@@ -417,6 +428,50 @@ function parseClaudeEnvelope(stdout) {
   } catch { return null; }
 }
 
+// ---------- stream-json 单行事件解析(与 macapp ClaudeStream 对齐) ----------
+// 只取粗粒度: assistant 事件的 tool_use/text 块 → 人话日志行; result 事件 → 标记为最终
+// (最终结论/用量仍由 parseClaudeEnvelope 从该 result 行取, 字段与 --output-format json 一致)。
+function claudeStreamSnippet(s) { const one = String(s).replace(/\n/g, ' '); return one.length > 120 ? one.slice(0, 120) + '…' : one; }
+function claudeToolBrief(name, input) {
+  if (!input || typeof input !== 'object') return '';
+  const str = (k) => (typeof input[k] === 'string' ? input[k] : null);
+  if (name === 'Bash') return str('command') ? claudeStreamSnippet(str('command')) : '';
+  if (['Read', 'Edit', 'Write', 'NotebookEdit'].includes(name)) return str('file_path') || '';
+  if (['Grep', 'Glob'].includes(name)) return str('pattern') || '';
+  const first = Object.values(input).find((v) => typeof v === 'string');
+  return first ? claudeStreamSnippet(first) : '';
+}
+function parseClaudeStreamLine(line) {
+  const s = String(line).trim();
+  if (!s.startsWith('{')) return { logs: [], isResult: false };
+  let obj; try { obj = JSON.parse(s); } catch { return { logs: [], isResult: false }; }
+  if (!obj || typeof obj.type !== 'string') return { logs: [], isResult: false };
+  if (obj.type === 'result') return { logs: [], isResult: true };
+  if (obj.type === 'assistant') {
+    const content = (obj.message && Array.isArray(obj.message.content)) ? obj.message.content : [];
+    const logs = [];
+    for (const b of content) {
+      if (b && b.type === 'tool_use' && b.name) {
+        const brief = claudeToolBrief(b.name, b.input);
+        logs.push('🔧 ' + b.name + (brief ? ' ' + brief : ''));
+      } else if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+        logs.push('💬 ' + claudeStreamSnippet(b.text.trim()));
+      }
+    }
+    return { logs, isResult: false };
+  }
+  return { logs: [], isResult: false };
+}
+// stdout 全文里扫最后一条 result 事件(流式回调漏接时兜底)。
+function scanClaudeResultLine(stdout) {
+  let found = null;
+  for (const raw of String(stdout).split('\n')) {
+    const s = raw.trim();
+    if (s.includes('"type":"result"') || s.includes('"type": "result"')) found = s;
+  }
+  return found;
+}
+
 function recordUsage(job, model, code, parsed, usage) {
   if (!usage) return;
   try {
@@ -535,11 +590,43 @@ function run(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { ...opts });
     let stdout = '', stderr = '';
-    if (child.stdout) child.stdout.on('data', (d) => { stdout += d; });
+    let timedOut = false, killTimer = null, graceTimer = null;
+    const clearTimers = () => { if (killTimer) clearTimeout(killTimer); if (graceTimer) clearTimeout(graceTimer); };
+    // 可选逐行回调(opts.onLine): 边读 stdout 边按 \n 切行回调, 供 stream-json 流式展示; 同时仍累积完整 stdout。
+    let lineBuf = '';
+    if (child.stdout) child.stdout.on('data', (d) => {
+      stdout += d;
+      if (typeof opts.onLine === 'function') {
+        lineBuf += d;
+        let nl;
+        while ((nl = lineBuf.indexOf('\n')) >= 0) {
+          const line = lineBuf.slice(0, nl); lineBuf = lineBuf.slice(nl + 1);
+          if (line) { try { opts.onLine(line); } catch { /* onLine 不得影响主流程 */ } }
+        }
+      }
+    });
     if (child.stderr) child.stderr.on('data', (d) => { stderr += d; });
     if (opts.stdin != null && child.stdin) { child.stdin.write(opts.stdin); child.stdin.end(); }
-    child.on('error', (e) => resolve({ code: 127, stdout, stderr: stderr + e.message }));
-    child.on('close', (code) => resolve({ code: code == null ? 1 : code, stdout, stderr }));
+    // 可选超时(opts.timeoutMs > 0): 先 SIGTERM, 宽限 8s 再 SIGKILL; 返回 code 124(对齐 macapp ProcessRunner)。
+    const timeoutMs = Number(opts.timeoutMs) || 0;
+    if (timeoutMs > 0) {
+      killTimer = setTimeout(() => {
+        timedOut = true;
+        try { child.kill('SIGTERM'); } catch {}
+        graceTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 8000);
+      }, timeoutMs);
+    }
+    child.on('error', (e) => { clearTimers(); resolve({ code: 127, stdout, stderr: stderr + e.message }); });
+    child.on('close', (code) => {
+      clearTimers();
+      // flush 最后一行(可能无结尾换行)
+      if (typeof opts.onLine === 'function' && lineBuf.trim()) { try { opts.onLine(lineBuf); } catch { /* ignore */ } }
+      if (timedOut) {
+        resolve({ code: 124, stdout, stderr: (stderr ? stderr + '\n' : '') + `[client] 超时(${Math.round(timeoutMs / 1000)}s)已终止子进程` });
+      } else {
+        resolve({ code: code == null ? 1 : code, stdout, stderr });
+      }
+    });
   });
 }
 
@@ -658,17 +745,57 @@ async function runReviewJob(job) {
 
   if (runningJob && runningJob.job_id === job.job_id) runningJob.stage = 'claude';
   send({ type: 'review_progress', job_id: job.job_id, stage: 'claude' });
-  log(`running claude --print --model ${model} in ${wt.worktreePath}`);
-  // --output-format json: 信封里带 usage/total_cost_usd(token 统计用)。老版 claude 不认/输出
-  // 非 json 时 parseClaudeEnvelope 返回 null → 按原始文本走老路径, usage 缺省为空, 零破坏。
-  const r = await run(cfg.claudePath, [
-    '--print', '--output-format', 'json', '--model', model, '--dangerously-skip-permissions',
-    '--add-dir', conf.mainRepo, '--add-dir', conf.worktreeBase,
-  ], { cwd: wt.worktreePath, stdin: prompt, env: { ...process.env, GIT_LFS_SKIP_SMUDGE: '1' } });
+  const timeoutMs = cfg.reviewTimeoutMs;
+  // ADO 单: 把 PAT 注入 claude 子进程环境, 让 /pr-review-azdo(经 az/REST 提交评论/投票)能认证;
+  // 顺带把旧变量名 AZDO_PAT 归一化成 az CLI 认的 AZURE_DEVOPS_EXT_PAT。与 macapp 行为对齐。
+  const claudeEnv = { ...process.env, GIT_LFS_SKIP_SMUDGE: '1' };
+  if (job.provider === 'azdo') {
+    const pat = process.env.AZURE_DEVOPS_EXT_PAT || process.env.AZDO_PAT || '';
+    if (pat) { claudeEnv.AZURE_DEVOPS_EXT_PAT = pat; claudeEnv.AZDO_PAT = pat; }
+    else log('⚠️ azdo 单但未检测到 AZURE_DEVOPS_EXT_PAT/AZDO_PAT, /pr-review-azdo 可能无法向 ADO 提交评论/投票');
+  }
+  // 优先 stream-json --verbose: 边跑边把 claude 的工具调用/文字喂进运行日志(实时可见); 末尾 result
+  // 事件带最终文本+用量(与 json 信封同字段, 复用 parseClaudeEnvelope)。老版不支持 → 本次拿不到 result
+  // 事件, 回退 --output-format json 重跑并记住(能力探测, stream 参数校验失败几乎不耗 token)。
+  const baseArgs = ['--print', '--model', model, '--dangerously-skip-permissions',
+    '--add-dir', conf.mainRepo, '--add-dir', conf.worktreeBase];
+  const streamArgs = ['--output-format', 'stream-json', '--verbose', ...baseArgs];
+  const jsonArgs = ['--output-format', 'json', ...baseArgs];
+  const useStream = streamJsonSupported !== false;
+  log(`running claude --print (${useStream ? 'stream-json' : 'json'}) --model ${model} in ${wt.worktreePath}`
+    + (timeoutMs > 0 ? ` (超时 ${Math.round(timeoutMs / 60000)} 分钟)` : ' (无超时)'));
 
-  const envlp = parseClaudeEnvelope(r.stdout);
+  let resultLine = null;
+  const onLine = useStream ? (line) => {
+    const { logs, isResult } = parseClaudeStreamLine(line);
+    for (const l of logs) log(`PR #${job.pr_num} ${l}`);
+    if (isResult) resultLine = line;
+  } : undefined;
+
+  let r = await run(cfg.claudePath, useStream ? streamArgs : jsonArgs,
+    { cwd: wt.worktreePath, stdin: prompt, env: claudeEnv, timeoutMs, onLine });
+
+  let payload = useStream ? (resultLine || scanClaudeResultLine(r.stdout)) : (r.stdout || null);
+  // 用了 stream 却没拿到 result 事件, 且不是超时 → 判定老版不支持: 回退 json 重跑一次并记住。
+  if (useStream && !payload && r.code !== 124) {
+    streamJsonSupported = false;
+    log('claude 未产出 stream-json 结果事件, 回退 --output-format json 重跑一次');
+    r = await run(cfg.claudePath, jsonArgs, { cwd: wt.worktreePath, stdin: prompt, env: claudeEnv, timeoutMs });
+    payload = r.stdout || null;
+  } else if (useStream && payload) {
+    streamJsonSupported = true;
+  }
+
+  const envlp = parseClaudeEnvelope(payload || '');
   const usage = envlp ? envlp.usage : null;
-  const logText = (envlp ? envlp.text : (r.stdout || '')) + (r.stderr ? '\n' + r.stderr : '');
+  // stream 模式 r.stdout 是整段 NDJSON, 不能当正文; 优先用 result 事件里的最终文本。
+  const baseText = envlp ? envlp.text : (useStream ? (payload || '(未取到 claude 结果)') : (r.stdout || ''));
+  let logText = baseText + (r.stderr ? '\n' + r.stderr : '');
+  // 超时终止(run 返回 code 124): 记一笔并在日志正文顶部标注, 便于本机排查; 仍按失败上报交服务端改派。
+  if (r.code === 124) {
+    log(`⏱ PR #${job.pr_num} review 超时(${Math.round(timeoutMs / 60000)} 分钟)已自动终止, 上报失败交服务端改派`);
+    logText = `⏱ 本次 Review 超时 (${Math.round(timeoutMs / 60000)} 分钟) 已自动终止。\n\n` + logText;
+  }
   const parsed = parseResult(logText);
   log(`claude exited=${r.code} verdict=${parsed.verdict || '-'} inline=${parsed.inline_count}`
     + (usage ? ` tokens(in/out)=${usage.input_tokens}/${usage.output_tokens} cost=$${usage.total_cost_usd}` : ''));
@@ -1002,6 +1129,9 @@ function persistConfig(incoming) {
     reviewModel: String(incoming.reviewModel || 'claude-opus-4-8').trim() || 'claude-opus-4-8',
     worktreeMaxAgeDays: Number(incoming.worktreeMaxAgeDays) || 14,
     heartbeatMs: Number(incoming.heartbeatMs) || 15000,
+    reviewTimeoutMs: (typeof incoming.reviewTimeoutMs === 'number' && incoming.reviewTimeoutMs >= 0)
+      ? incoming.reviewTimeoutMs
+      : (typeof cur.reviewTimeoutMs === 'number' ? cur.reviewTimeoutMs : 1800000),
     autoRepos: incoming.autoRepos !== false,
     repoBaseDir: String(incoming.repoBaseDir || '').trim() || path.join(os.homedir(), 'LarkReviewRepos'),
     globalPrompt: (incoming.globalPrompt && String(incoming.globalPrompt).trim()) ? String(incoming.globalPrompt) : '',
@@ -1071,7 +1201,7 @@ function startConfigServer() {
       return json(200, {
         serverUrl: cfg.serverUrl || '', token: cfg.token || '', claudePath: cfg.claudePath || 'claude',
         reviewModel: cfg.reviewModel || 'claude-opus-4-8', worktreeMaxAgeDays: cfg.worktreeMaxAgeDays || 14,
-        heartbeatMs: cfg.heartbeatMs || 15000, repos: cfg.repos || {},
+        heartbeatMs: cfg.heartbeatMs || 15000, reviewTimeoutMs: cfg.reviewTimeoutMs, repos: cfg.repos || {},
         autoRepos: cfg.autoRepos !== false,               // 自动参与服务端受管项目(默认开)
         repoBaseDir: cfg.repoBaseDir || '',               // 默认克隆根目录(自动模式的 clone 位置)
         globalPrompt: cfg.globalPrompt || '',             // 全局提示词(单项目 prompt 优先)

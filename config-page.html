@@ -100,6 +100,10 @@
       <div><label>worktree 最长保留天数</label><input id="worktreeMaxAgeDays" type="number" placeholder="14"></div>
       <div><label>心跳间隔(ms)</label><input id="heartbeatMs" type="number" placeholder="15000"></div>
     </div>
+    <div class="two">
+      <div><label>Review 超时(分钟, 0=不限时)</label><input id="reviewTimeoutMin" type="number" placeholder="30"></div>
+      <div></div>
+    </div>
     <label>默认克隆根目录 repoBaseDir</label>
     <input id="repoBaseDir" class="mono" placeholder="~/LarkReviewRepos">
     <div class="muted" style="margin-top:4px">未单独配置路径的项目自动 clone 到 <code>该目录/owner-repo</code>(worktree 在旁边的 <code>…-worktrees</code>)。改动只影响之后的自动 clone,已 clone 的项目不动。</div>
@@ -256,6 +260,7 @@ async function load(){
   $('serverUrl').value=c.serverUrl||''; $('token').value=c.token||'';
   $('claudePath').value=c.claudePath||''; $('reviewModel').value=c.reviewModel||'';
   $('worktreeMaxAgeDays').value=c.worktreeMaxAgeDays||''; $('heartbeatMs').value=c.heartbeatMs||'';
+  $('reviewTimeoutMin').value=(typeof c.reviewTimeoutMs==='number')?Math.round(c.reviewTimeoutMs/60000):30;
   $('repoBaseDir').value=c.repoBaseDir||''; $('globalPrompt').value=c.globalPrompt||'';
   $('autoRepos').checked = c.autoRepos!==false;
   window.__repoBaseDir=c.repoBaseDir||'';               // 项目块的"留空 = 自动路径"占位提示用
@@ -344,6 +349,7 @@ function collect(){
     serverUrl:$('serverUrl').value.trim(), token:$('token').value.trim(),
     claudePath:$('claudePath').value.trim()||'claude', reviewModel:$('reviewModel').value.trim()||'claude-opus-4-8',
     worktreeMaxAgeDays:Number($('worktreeMaxAgeDays').value)||14, heartbeatMs:Number($('heartbeatMs').value)||15000,
+    reviewTimeoutMs:Math.max(0,Number($('reviewTimeoutMin').value)||0)*60000,
     autoRepos:$('autoRepos').checked,
     repoBaseDir:$('repoBaseDir').value.trim(),
     globalPrompt:$('globalPrompt').value,

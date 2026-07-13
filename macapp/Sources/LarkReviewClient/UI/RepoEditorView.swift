@@ -9,11 +9,14 @@ struct ReposTab: View {
     @State private var manualRepoName = ""
 
     private var managedNames: Set<String> { Set(state.managedRepos.map(\.repo)) }
-    /// 展示列表 = 受管项目全部常驻(autoRepos 下自动参与, 全空 = 全自动) + 本地多配的非受管项目。
-    private var displayNames: [String] {
-        var names = managedNames
-        names.formUnion(draft.repos.keys)
-        return names.sorted()
+
+    /// 受管(可参与)项目: 服务端下发的清单(autoRepos 下自动参与; 也含为受管项目配了本机路径的)。
+    private var participatingNames: [String] {
+        managedNames.union(draft.repos.keys.filter { managedNames.contains($0) }).sorted()
+    }
+    /// 本地遗留/未受管: 本机配置里有、但不在服务端受管清单里的(不会被派单)。
+    private var unmanagedNames: [String] {
+        draft.repos.keys.filter { !managedNames.contains($0) }.sorted()
     }
 
     var body: some View {
@@ -45,20 +48,45 @@ struct ReposTab: View {
                 }
             }
 
-            ForEach(displayNames, id: \.self) { name in
-                Section {
-                    RepoEditor(
-                        name: name,
-                        managed: state.managedRepos.first { $0.repo == name },
-                        isManaged: managedNames.isEmpty || managedNames.contains(name),
-                        autoPath: draft.resolveRepo(name).mainRepo,
-                        repo: bindingFor(name),
-                        onRemove: { draft.repos.removeValue(forKey: name) }
-                    )
+            if state.isRegistered {
+                // 已注册: 服务端清单是权威的, 按「受管」/「本地遗留」分区展示。
+                ForEach(participatingNames, id: \.self) { name in
+                    Section("服务端受管 · 会参与派单") {
+                        repoEditor(name, isManaged: true)
+                    }
+                }
+                if !unmanagedNames.isEmpty {
+                    Section("本地遗留 · 服务端未受管(不会被派单)") {
+                        Text("这些项目在你本机配置里, 但不在服务端当前受管清单中, 不会给你派单。可点右侧垃圾桶移除以保持整洁。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(unmanagedNames, id: \.self) { name in
+                            repoEditor(name, isManaged: false)
+                        }
+                    }
+                }
+            } else {
+                // 未连接: 拿不到服务端清单, 只如实展示本机已配置项目, 不做受管/未受管判定(避免误报警告)。
+                let localNames = draft.repos.keys.sorted()
+                ForEach(localNames, id: \.self) { name in
+                    Section("本机已配置项目(连接后按服务端清单核对)") {
+                        repoEditor(name, isManaged: true)
+                    }
                 }
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func repoEditor(_ name: String, isManaged: Bool) -> some View {
+        RepoEditor(
+            name: name,
+            managed: state.managedRepos.first { $0.repo == name },
+            isManaged: isManaged,
+            autoPath: draft.resolveRepo(name).mainRepo,
+            repo: bindingFor(name),
+            onRemove: { draft.repos.removeValue(forKey: name) }
+        )
     }
 
     private func bindingFor(_ name: String) -> Binding<RepoConfig> {

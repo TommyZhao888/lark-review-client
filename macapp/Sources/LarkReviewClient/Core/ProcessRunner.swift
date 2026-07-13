@@ -10,7 +10,8 @@ struct ProcessResult {
 /// - 等退出前并发排空 stdout/stderr，防管道写满死锁
 /// - stdin 写完必须 close（claude 等 EOF）
 /// - 找不到可执行文件时返回 code=127（对齐 Node 的 spawn error 分支）
-/// - 无超时：claude 一直跑到自己退出
+/// - 可选超时 timeoutMs>0：先 SIGTERM 宽限 8s 再 SIGKILL，返回 code=124（对齐 Node run 的 timeoutMs）
+/// - 可选 handle：把在跑的进程暴露给调用方，用于手动终止（cancelCurrent）
 enum ProcessRunner {
 
     /// GUI app 的 PATH 极精简（/usr/bin:/bin:...），claude/git/gh 常装在
@@ -60,7 +61,10 @@ enum ProcessRunner {
         _ args: [String],
         cwd: String? = nil,
         stdin: String? = nil,
-        extraEnv: [String: String] = [:]
+        extraEnv: [String: String] = [:],
+        timeoutMs: Int = 0,
+        handle: ProcHandle? = nil,
+        onOutputLine: (@Sendable (String) -> Void)? = nil
     ) async -> ProcessResult {
         guard let exe = resolveExecutable(cmd) else {
             return ProcessResult(code: 127, stdout: "", stderr: "command not found: \(cmd)")
@@ -87,7 +91,24 @@ enum ProcessRunner {
             return ProcessResult(code: 127, stdout: "", stderr: error.localizedDescription)
         }
         ChildProcessRegistry.shared.register(p)
-        defer { ChildProcessRegistry.shared.unregister(p) }
+        handle?.attach(p)
+        defer { ChildProcessRegistry.shared.unregister(p); handle?.detach() }
+
+        // 可选超时：到点先 SIGTERM，宽限 8s 仍在跑再 SIGKILL；用 timedOut 标记以便返回 124。
+        let timedOut = AtomicFlag()
+        var timeoutWork: DispatchWorkItem?
+        if timeoutMs > 0 {
+            let work = DispatchWorkItem {
+                timedOut.set()
+                p.terminate()
+                let pid = p.processIdentifier
+                DispatchQueue.global().asyncAfter(deadline: .now() + 8) {
+                    if p.isRunning { kill(pid, SIGKILL) }
+                }
+            }
+            timeoutWork = work
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(timeoutMs), execute: work)
+        }
 
         // stdin 写入放后台（大 prompt 可能阻塞在管道容量上），写完必须 close 给 EOF。
         if let inPipe, let stdin {
@@ -98,8 +119,8 @@ enum ProcessRunner {
             }
         }
 
-        // 并发排空两条输出管道，然后等退出。
-        async let outData = drain(outPipe)
+        // 并发排空两条输出管道，然后等退出。stdout 若给了 onOutputLine 则边读边按行回调(流式)。
+        async let outData = drainOut(outPipe, onLine: onOutputLine)
         async let errData = drain(errPipe)
         let code: Int32 = await withCheckedContinuation { cont in
             DispatchQueue.global().async {
@@ -107,8 +128,13 @@ enum ProcessRunner {
                 cont.resume(returning: p.terminationStatus)
             }
         }
+        timeoutWork?.cancel()
         let stdout = String(data: await outData, encoding: .utf8) ?? ""
         let stderr = String(data: await errData, encoding: .utf8) ?? ""
+        if timedOut.isSet {
+            let note = "[client] 超时(\(timeoutMs / 1000)s)已终止子进程"
+            return ProcessResult(code: 124, stdout: stdout, stderr: stderr.isEmpty ? note : stderr + "\n" + note)
+        }
         return ProcessResult(code: code, stdout: stdout, stderr: stderr)
     }
 
@@ -118,6 +144,66 @@ enum ProcessRunner {
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 cont.resume(returning: data)
             }
+        }
+    }
+
+    /// 有 onLine 则流式排空(边读边按行回调), 否则退回一次性读到 EOF。
+    private static func drainOut(_ pipe: Pipe, onLine: (@Sendable (String) -> Void)?) async -> Data {
+        if let onLine { return await drainStreaming(pipe, onLine: onLine) }
+        return await drain(pipe)
+    }
+
+    /// 流式排空: 边读边按 \n 切行回调 onLine, 同时累积完整数据返回(供最终解析/兜底)。
+    private static func drainStreaming(_ pipe: Pipe, onLine: @escaping @Sendable (String) -> Void) async -> Data {
+        await withCheckedContinuation { cont in
+            DispatchQueue.global().async {
+                let fh = pipe.fileHandleForReading
+                var acc = Data()
+                var lineBuf = Data()
+                while true {
+                    let chunk = fh.availableData
+                    if chunk.isEmpty { break }   // EOF
+                    acc.append(chunk)
+                    lineBuf.append(chunk)
+                    while let nl = lineBuf.firstIndex(of: 0x0A) {
+                        let lineData = lineBuf.subdata(in: lineBuf.startIndex..<nl)
+                        lineBuf.removeSubrange(lineBuf.startIndex...nl)
+                        if let s = String(data: lineData, encoding: .utf8), !s.isEmpty { onLine(s) }
+                    }
+                }
+                if let s = String(data: lineBuf, encoding: .utf8),
+                   !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { onLine(s) }
+                cont.resume(returning: acc)
+            }
+        }
+    }
+}
+
+/// 线程安全布尔标记（超时是否已触发；跨 DispatchQueue 读写）。
+final class AtomicFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    func set() { lock.lock(); flag = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+}
+
+/// 单个在跑子进程的句柄：调用方持有，用于手动终止（先 SIGTERM，宽限 8s 再 SIGKILL）。
+/// 与 ProcessRunner.run(handle:) 配合——run 内部 attach/detach，外部 terminate。
+final class ProcHandle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var proc: Process?
+
+    func attach(_ p: Process) { lock.lock(); proc = p; lock.unlock() }
+    func detach() { lock.lock(); proc = nil; lock.unlock() }
+
+    /// 请求终止当前进程；无进程在跑则忽略（幂等）。
+    func terminate() {
+        lock.lock(); let p = proc; lock.unlock()
+        guard let p, p.isRunning else { return }
+        p.terminate()
+        let pid = p.processIdentifier
+        DispatchQueue.global().asyncAfter(deadline: .now() + 8) {
+            if p.isRunning { kill(pid, SIGKILL) }
         }
     }
 }

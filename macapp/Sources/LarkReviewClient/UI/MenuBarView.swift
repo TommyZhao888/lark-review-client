@@ -120,6 +120,26 @@ struct MenuBarView: View {
                 Text("开始于 \(job.since.formatted(date: .omitted, time: .shortened))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    // 查看实时进度: 打开日志窗口看 claude 正在读哪个文件/跑哪条命令(stream-json)。
+                    Button {
+                        dismiss()
+                        openWindow(id: "logs")
+                        NSApp.activate(ignoringOtherApps: true)
+                    } label: {
+                        Label("查看日志", systemImage: "doc.text.magnifyingglass")
+                    }
+                    .controlSize(.small)
+                    // 卡死/跑太久时手动终止: 终止 claude 进程, 本单按失败收尾并释放队列(交服务端改派)。
+                    Button(role: .destructive) {
+                        AppRuntime.shared.reviews.cancelCurrent()
+                    } label: {
+                        Label(state.cancelling ? "终止中…" : "终止当前 Review", systemImage: "stop.circle")
+                    }
+                    .controlSize(.small)
+                    .disabled(state.cancelling)
+                }
+                .padding(.top, 2)
             }
         }
         if !state.queuedJobs.isEmpty {
