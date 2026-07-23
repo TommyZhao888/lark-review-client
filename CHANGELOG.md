@@ -1,5 +1,19 @@
 # 更新说明
 
+## v1.8.2 — 2026-07-23
+
+> 紧急修复(仅 macapp):review 已完成、结果已发 GitHub,任务却永远显示"进行中",终止无效、后续任务全部排队卡死。
+
+- **修复 `waitUntilExit` 永久悬挂导致任务不收尾**。claude 正常退出(结果已提交 GitHub)后,
+  macOS Foundation 的 NSTask **终止通知偶发丢失**(mach 通知竞态/子进程被别处 reap):进程早已消失,
+  `waitUntilExit` 却永远挂在 `mach_msg` —— 任务不上报、`busy` 不复位、队列全堵,点「终止」也无效
+  (进程已死,terminate 是 no-op)。实测 2026-07-23 PR #636:review 已 APPROVE 到 GitHub,任务挂 20+ 分钟
+  (`sample` 线程栈证实挂点)。与 v1.8.1 修的管道排空卡死是**两个不同层**的问题。
+- **修法**:等退出改为双通道竞速 —— 正常 `waitUntilExit` 拿精确退出码;另起 `kill(pid,0)` 轮询兜底,
+  发现进程已消失而通道1未醒,宽限 2s 后强制收尾(退出码不可得按 0 + stderr 注记;verdict 判定以
+  stdout 结果行为准,不受影响)。正常路径行为与退出码完全不变。
+- Node 客户端走 libuv 事件驱动,无此问题,本版仅同步版本号。
+
 ## v1.8.1 — 2026-07-13
 
 > 紧急修复:review 任务卡死不收尾 / 点「终止」后卡在"终止中"。双端(Node + macapp)对齐。

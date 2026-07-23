@@ -122,10 +122,35 @@ enum ProcessRunner {
         // 并发排空两条输出管道，然后等退出。stdout 若给了 onOutputLine 则边读边按行回调(流式)。
         async let outData = drainOut(outPipe, onLine: onOutputLine)
         async let errData = drainOut(errPipe, onLine: nil)
-        let code: Int32 = await withCheckedContinuation { cont in
+        // 等退出: 双通道竞速, 只收尾一次。
+        // 通道1: waitUntilExit(正常路径, 拿精确退出码)。
+        // 通道2: kill(pid,0) 轮询兜底 —— NSTask 的终止通知可能丢失(mach 通知竞态/子进程被别处 reap),
+        //   此时进程早已消失(无僵尸)而 waitUntilExit 永久悬挂在 mach_msg: 整单 review 卡死不收尾、
+        //   busy 不复位队列全堵、点「终止」也无效(进程已死, terminate 是 no-op)。实测 2026-07-23
+        //   PR #636: 结果已发 GitHub、claude 已退出, waitUntilExit 挂 20+ 分钟(sample 栈证实)。
+        //   进程消失后给通道1一个 2s 宽限拿真实退出码; 仍没醒就以 0 收尾并注记(verdict 判定以
+        //   stdout 结果行为准, 不受影响; 真实失败时 stdout 无结果行, 服务端有反查兜底)。
+        //   注意兜底路径绝不能读 terminationStatus —— NSTask 仍自认 running, 读了直接抛 ObjC 异常。
+        //   pid 复用会让轮询失明, 但需与通道1悬挂同时发生, 双小概率, 接受。
+        let waitBypassed = AtomicFlag()
+        let exitPid = p.processIdentifier
+        let code: Int32 = await withCheckedContinuation { (cont: CheckedContinuation<Int32, Never>) in
+            let resumed = AtomicFlag()
             DispatchQueue.global().async {
                 p.waitUntilExit()
-                cont.resume(returning: p.terminationStatus)
+                if !resumed.testAndSet() { cont.resume(returning: p.terminationStatus) }
+            }
+            DispatchQueue.global().async {
+                while kill(exitPid, 0) == 0 {
+                    if resumed.isSet { return }              // 通道1已收尾, 轮询线程退出
+                    usleep(500_000)
+                }
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                    if !resumed.testAndSet() {
+                        waitBypassed.set()
+                        cont.resume(returning: 0)
+                    }
+                }
             }
         }
         timeoutWork?.cancel()
@@ -144,6 +169,10 @@ enum ProcessRunner {
         if timedOut.isSet {
             let note = "[client] 超时(\(timeoutMs / 1000)s)已终止子进程"
             return ProcessResult(code: 124, stdout: stdout, stderr: stderr.isEmpty ? note : stderr + "\n" + note)
+        }
+        if waitBypassed.isSet {
+            let note = "[client] waitUntilExit 未醒(终止通知丢失), 已按进程消失兜底收尾(退出码不可得, 按 0)"
+            return ProcessResult(code: code, stdout: stdout, stderr: stderr.isEmpty ? note : stderr + "\n" + note)
         }
         return ProcessResult(code: code, stdout: stdout, stderr: stderr)
     }
@@ -186,6 +215,8 @@ final class AtomicFlag: @unchecked Sendable {
     private var flag = false
     func set() { lock.lock(); flag = true; lock.unlock() }
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+    /// 置位并返回置位前的旧值(test-and-set), 用于"多通道竞速只收尾一次"。
+    func testAndSet() -> Bool { lock.lock(); defer { lock.unlock() }; let old = flag; flag = true; return old }
 }
 
 /// 单个在跑子进程的句柄：调用方持有，用于手动终止（先 SIGTERM，宽限 8s 再 SIGKILL）。
