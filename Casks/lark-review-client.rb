@@ -5,7 +5,7 @@
 # 请勿手工改这两行；其余 stanza 才是人工维护的。
 cask "lark-review-client" do
   version "1.9.0"
-  sha256 "8d411dc9d887d3c9338fc2bee9b51319431c961ef266911b16743c10cf0362e3"
+  sha256 "5758f72467b89e64d3f9b7caf0815a54464d4834a56bd4c760e33f48aebcf355"
 
   url "https://github.com/TommyZhao888/lark-review-client/releases/download/v#{version}/LarkReviewClient-v#{version}.dmg"
   name "LarkReviewClient"
