@@ -83,7 +83,7 @@ final class AppRuntime {
         usageTask = Task { @MainActor [state, ws] in
             while !Task.isCancelled {
                 let ok = await QuotaMonitor.shared.refreshUsage(config: state.config)
-                if ok { ws.send(.quota(quota: QuotaMonitor.shared.current(config: state.config))) }
+                if ok { ws.send(.quota(quota: QuotaMonitor.shared.current(config: state.config), wsReconnects24h: ws.reconnects24h)) }
                 try? await Task.sleep(for: .seconds(600))
             }
         }

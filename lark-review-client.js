@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.8.2';
+const CLIENT_VERSION = '1.9.0';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -326,19 +326,34 @@ function pollUsage() {
 
 // 汇总当前额度状态给服务端。反应式(命中限额)优先; 否则用 /usage 的 5 小时/7 天窗判定, 并带出百分比与恢复时间。
 // 默认 ok(拿不到 = 不拦, 交给反应式兜底; 管理页显示 —)。
+// v1.9: seven_day_pct/seven_day_reset_at 作为独立字段透出(此前已解析缓存, 但只在超阈值时拼进
+// reason 字符串), 供服务端评分选人的"额度余量"分项(取 5h/7d 已用%较大者); 缺 → 服务端中位兜底。
 function currentQuota() {
   const u = (usageQuota && Date.now() - usageQuotaAt < USAGE_FRESH_MS) ? usageQuota : null;
   const f5 = u && u.five_hour_pct != null ? u.five_hour_pct : null;
   const f5r = u && u.five_hour_reset_at != null ? u.five_hour_reset_at : null;
+  const d7 = u && u.seven_day_pct != null ? u.seven_day_pct : null;
+  const d7r = u && u.seven_day_reset_at != null ? u.seven_day_reset_at : null;
+  const base = { five_hour_pct: f5, five_hour_reset_at: f5r, seven_day_pct: d7, seven_day_reset_at: d7r };
   if (reactiveQuotaBlock) {
     if (reactiveQuotaBlock.reset_at && Date.now() >= reactiveQuotaBlock.reset_at) reactiveQuotaBlock = null;
-    else return { ok: false, reason: reactiveQuotaBlock.reason, reset_at: reactiveQuotaBlock.reset_at || null, five_hour_pct: f5, five_hour_reset_at: f5r };
+    else return { ok: false, reason: reactiveQuotaBlock.reason, reset_at: reactiveQuotaBlock.reset_at || null, ...base };
   }
   if (u) {
-    if (f5 != null && f5 >= cfg.quotaFiveHourThreshold) return { ok: false, reason: `five_hour_${f5}pct`, reset_at: f5r, five_hour_pct: f5, five_hour_reset_at: f5r };
-    if (u.seven_day_pct != null && u.seven_day_pct >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${u.seven_day_pct}pct`, reset_at: u.seven_day_reset_at || null, five_hour_pct: f5, five_hour_reset_at: f5r };
+    if (f5 != null && f5 >= cfg.quotaFiveHourThreshold) return { ok: false, reason: `five_hour_${f5}pct`, reset_at: f5r, ...base };
+    if (d7 != null && d7 >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${d7}pct`, reset_at: d7r, ...base };
   }
-  return { ok: true, reason: null, reset_at: null, five_hour_pct: f5, five_hour_reset_at: f5r };
+  return { ok: true, reason: null, reset_at: null, ...base };
+}
+
+// 24h 内 ws 重连次数(网络稳定性弱信号, 随 register/quota 上报, 供服务端评分选人降权)。
+// 时间戳数组读时剪窗; 重连退避上限 30s → 24h 至多 ~2880 条, 无需环形。
+// 进程重启计数清零 → 上报 0(中性), 可接受(注: 频繁重启本身多半也是网络/环境问题, 但先不过度设计)。
+const wsReconnectTs = [];
+function wsReconnects24h() {
+  const cutoff = Date.now() - 24 * 3600 * 1000;
+  while (wsReconnectTs.length && wsReconnectTs[0] < cutoff) wsReconnectTs.shift();
+  return wsReconnectTs.length;
 }
 
 // 清理旧版(1.3~1.5.5)对 Claude statusLine 的改动: 现在改用 `claude -p /usage` 查额度, 不再需要 statusLine。
@@ -933,6 +948,7 @@ function sendRegister() {
     repos: lastSentRepos,
     version: CLIENT_VERSION,
     quota: currentQuota(),
+    ws_reconnects_24h: wsReconnects24h(),
   });
 }
 // 受管清单更新后(register_ack / repos_updated): autoRepos 下参与列表可能变了 → 重发 register
@@ -947,7 +963,7 @@ function reRegisterIfReposChanged(reason) {
 
 // Claude 额度独立上报(与心跳解耦): 心跳 ~15s 高频, 额度 10min 才刷一次, 不必每心跳重复带。
 // 在 register_ack 后 + 每次 /usage 刷新后调用; ws 未连时 send() 自动 no-op。
-function sendQuota() { send({ type: 'quota', quota: currentQuota() }); }
+function sendQuota() { send({ type: 'quota', quota: currentQuota(), ws_reconnects_24h: wsReconnects24h() }); }
 
 function connect() {
   log(`connecting ${cfg.serverUrl} …`);
@@ -1073,6 +1089,7 @@ function connect() {
       notify('⚠️ 与 hub 断开', '正在自动重连…' + (busy && runningJob ? ` (PR #${runningJob.pr_num} 仍在本机继续)` : ''));
     }
     logErr(`disconnected; reconnecting in ${reconnectDelay}ms`);
+    wsReconnectTs.push(Date.now());   // 网络稳定性计数(24h 窗, 随 register/quota 上报)
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30000);
   });

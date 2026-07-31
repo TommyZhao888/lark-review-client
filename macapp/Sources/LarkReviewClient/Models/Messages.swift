@@ -8,22 +8,24 @@ import Foundation
 // ---------- 出站 ----------
 
 enum OutboundMessage {
-    case register(token: String, hostname: String, repos: [String], version: String, quota: QuotaStatus)
+    // v1.9: wsReconnects24h = 24h 内断线重连次数(网络稳定性弱信号, 供服务端评分选人降权; 旧 hub 忽略未知键)。
+    case register(token: String, hostname: String, repos: [String], version: String, quota: QuotaStatus, wsReconnects24h: Int)
     case heartbeat                                       // 精简: 只保活, 额度改走独立 .quota 消息
-    case quota(quota: QuotaStatus)                       // Claude 额度独立上报(register_ack 后 + 每次 /usage 刷新后)
+    case quota(quota: QuotaStatus, wsReconnects24h: Int) // Claude 额度独立上报(register_ack 后 + 每次 /usage 刷新后)
     case reviewProgress(jobId: String, stage: String)   // stage: "worktree" | "claude"
     case reviewResult(jobId: String, result: ReviewResult)
     case reconnected(wasBusy: Bool, repo: String, prNum: Int?)   // prNum 无任务时发 ""
 
     var jsonObject: [String: Any] {
         switch self {
-        case let .register(token, hostname, repos, version, quota):
+        case let .register(token, hostname, repos, version, quota, wsReconnects24h):
             return ["type": "register", "token": token, "hostname": hostname,
-                    "repos": repos, "version": version, "quota": quota.jsonObject]
+                    "repos": repos, "version": version, "quota": quota.jsonObject,
+                    "ws_reconnects_24h": wsReconnects24h]
         case .heartbeat:
             return ["type": "heartbeat"]
-        case let .quota(quota):
-            return ["type": "quota", "quota": quota.jsonObject]
+        case let .quota(quota, wsReconnects24h):
+            return ["type": "quota", "quota": quota.jsonObject, "ws_reconnects_24h": wsReconnects24h]
         case let .reviewProgress(jobId, stage):
             return ["type": "review_progress", "job_id": jobId, "stage": stage]
         case let .reviewResult(jobId, r):

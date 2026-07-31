@@ -7,6 +7,8 @@ struct QuotaStatus: Equatable {
     var resetAtMs: Int? = nil
     var fiveHourPct: Int? = nil        // 5 小时窗已用%(仅有新鲜快照时非空), 供管理页显示
     var fiveHourResetAtMs: Int? = nil  // 5 小时窗恢复时间(ms), 始终带出供派活参考
+    var sevenDayPct: Int? = nil        // v1.9: 7 天窗已用%(独立透出, 供服务端评分选人的额度余量分项)
+    var sevenDayResetAtMs: Int? = nil  // v1.9: 7 天窗恢复时间(ms)
 
     /// 出站 JSON 字典(nil 字段省略键, 服务端按缺失=null 处理)。
     var jsonObject: [String: Any] {
@@ -15,6 +17,8 @@ struct QuotaStatus: Equatable {
         if let resetAtMs { o["reset_at"] = resetAtMs }
         if let fiveHourPct { o["five_hour_pct"] = fiveHourPct }
         if let fiveHourResetAtMs { o["five_hour_reset_at"] = fiveHourResetAtMs }
+        if let sevenDayPct { o["seven_day_pct"] = sevenDayPct }
+        if let sevenDayResetAtMs { o["seven_day_reset_at"] = sevenDayResetAtMs }
         return o
     }
 }
@@ -56,19 +60,21 @@ final class QuotaMonitor {
         let fresh = Date().timeIntervalSince(usageAt) < usageFreshSec
         let f5 = fresh ? usageFiveHourPct : nil
         let f5r = fresh ? usageFiveHourResetMs : nil
+        let d7 = fresh ? usageSevenDayPct : nil
+        let d7r = fresh ? usageSevenDayResetMs : nil
         if let b = reactiveBlock {
             if Date() >= b.resetAt { reactiveBlock = nil }
-            else { return QuotaStatus(ok: false, reason: b.reason, resetAtMs: ms(b.resetAt), fiveHourPct: f5, fiveHourResetAtMs: f5r) }
+            else { return QuotaStatus(ok: false, reason: b.reason, resetAtMs: ms(b.resetAt), fiveHourPct: f5, fiveHourResetAtMs: f5r, sevenDayPct: d7, sevenDayResetAtMs: d7r) }
         }
         if fresh {
             if let f5, f5 >= config.quotaFiveHourThreshold {
-                return QuotaStatus(ok: false, reason: "five_hour_\(f5)pct", resetAtMs: f5r, fiveHourPct: f5, fiveHourResetAtMs: f5r)
+                return QuotaStatus(ok: false, reason: "five_hour_\(f5)pct", resetAtMs: f5r, fiveHourPct: f5, fiveHourResetAtMs: f5r, sevenDayPct: d7, sevenDayResetAtMs: d7r)
             }
-            if let d7 = usageSevenDayPct, d7 >= config.quotaSevenDayThreshold {
-                return QuotaStatus(ok: false, reason: "seven_day_\(d7)pct", resetAtMs: usageSevenDayResetMs, fiveHourPct: f5, fiveHourResetAtMs: f5r)
+            if let d7v = d7, d7v >= config.quotaSevenDayThreshold {
+                return QuotaStatus(ok: false, reason: "seven_day_\(d7v)pct", resetAtMs: d7r, fiveHourPct: f5, fiveHourResetAtMs: f5r, sevenDayPct: d7, sevenDayResetAtMs: d7r)
             }
         }
-        return QuotaStatus(ok: true, fiveHourPct: f5, fiveHourResetAtMs: f5r)
+        return QuotaStatus(ok: true, fiveHourPct: f5, fiveHourResetAtMs: f5r, sevenDayPct: d7, sevenDayResetAtMs: d7r)
     }
 
     // MARK: - 反应式解析

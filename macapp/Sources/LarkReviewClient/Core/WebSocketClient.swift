@@ -29,6 +29,14 @@ final class WebSocketClient: NSObject {
     private var config = Config()
 
     private var reconnectDelay: TimeInterval = 1.0
+    // v1.9: 24h 内断线重连时间戳(网络稳定性弱信号, 随 register/quota 上报供服务端评分降权)。
+    // 读时剪窗; 退避上限 30s → 24h 至多 ~2880 条, 无需环形。进程重启清零 → 上报 0(中性)。
+    private var reconnectTs: [Date] = []
+    var reconnects24h: Int {
+        let cutoff = Date().addingTimeInterval(-24 * 3600)
+        reconnectTs.removeAll { $0 < cutoff }
+        return reconnectTs.count
+    }
     private var connected = false
     private var registered = false
     private var everRegistered = false          // 曾成功注册过 → 之后的断开算「重连」
@@ -131,7 +139,8 @@ final class WebSocketClient: NSObject {
                 hostname: hostname,
                 repos: self.lastSentRepos,
                 version: CLIENT_VERSION,
-                quota: QuotaMonitor.shared.current(config: self.config)
+                quota: QuotaMonitor.shared.current(config: self.config),
+                wsReconnects24h: self.reconnects24h
             ))
         }
     }
@@ -232,7 +241,7 @@ final class WebSocketClient: NSObject {
             everRegistered = true
             onStateChange?(.registered)
             LogStore.shared.log("registered as \(ack.name ?? "?") (\(ack.open_id ?? "?")) ✓  本机 v\(CLIENT_VERSION)，服务端推荐 v\(ack.recommended_version ?? "?")")
-            send(.quota(quota: QuotaMonitor.shared.current(config: config)))   // 注册后立即上报一次额度(心跳不再带)
+            send(.quota(quota: QuotaMonitor.shared.current(config: config), wsReconnects24h: reconnects24h))   // 注册后立即上报一次额度(心跳不再带)
             onRegisterAck?(ack, wasReconnect)
 
         case .reposUpdated(let upd):
@@ -288,6 +297,7 @@ final class WebSocketClient: NSObject {
             onDisconnected?(true)
         }
         LogStore.shared.log("disconnected; reconnecting in \(Int(reconnectDelay * 1000))ms")
+        reconnectTs.append(Date())   // 网络稳定性计数(24h 窗)
         let delay = reconnectDelay
         reconnectDelay = min(reconnectDelay * 2, 30)
         reconnectTask?.cancel()

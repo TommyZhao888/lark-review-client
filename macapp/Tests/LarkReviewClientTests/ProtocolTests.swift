@@ -12,13 +12,14 @@ final class ProtocolTests: XCTestCase {
 
     func testRegisterMessage() throws {
         let obj = try jsonObject(.register(token: "tk", hostname: "my-mac", repos: ["a/b", "c/d"],
-                                           version: "2.0.0", quota: QuotaStatus()))
+                                           version: "2.0.0", quota: QuotaStatus(), wsReconnects24h: 0))
         XCTAssertEqual(obj["type"] as? String, "register")
         XCTAssertEqual(obj["token"] as? String, "tk")
         XCTAssertEqual(obj["hostname"] as? String, "my-mac")
         XCTAssertEqual(obj["repos"] as? [String], ["a/b", "c/d"])
         XCTAssertEqual(obj["version"] as? String, "2.0.0")
         XCTAssertEqual((obj["quota"] as? [String: Any])?["ok"] as? Bool, true)
+        XCTAssertEqual(obj["ws_reconnects_24h"] as? Int, 0)   // v1.9: 网络稳定性弱信号
         XCTAssertNil(obj["open_id"], "绝不上报 open_id（防冒名，身份归服务端）")
         XCTAssertNil(obj["name"])
     }
@@ -32,15 +33,20 @@ final class ProtocolTests: XCTestCase {
 
     func testQuotaMessageExhausted() throws {
         let q = QuotaStatus(ok: false, reason: "5h window 92%", resetAtMs: 1_700_000_000_000,
-                            fiveHourPct: 92, fiveHourResetAtMs: 1_700_000_000_000)
-        let obj = try jsonObject(.quota(quota: q))
+                            fiveHourPct: 92, fiveHourResetAtMs: 1_700_000_000_000,
+                            sevenDayPct: 55, sevenDayResetAtMs: 1_700_000_500_000)
+        let obj = try jsonObject(.quota(quota: q, wsReconnects24h: 3))
         XCTAssertEqual(obj["type"] as? String, "quota")
+        XCTAssertEqual(obj["ws_reconnects_24h"] as? Int, 3)
         let quota = obj["quota"] as? [String: Any]
         XCTAssertEqual(quota?["ok"] as? Bool, false)
         XCTAssertEqual(quota?["reason"] as? String, "5h window 92%")
         XCTAssertEqual(quota?["reset_at"] as? Int, 1_700_000_000_000)
         XCTAssertEqual(quota?["five_hour_pct"] as? Int, 92)
         XCTAssertEqual(quota?["five_hour_reset_at"] as? Int, 1_700_000_000_000)
+        // v1.9: 7 天窗独立字段透出, 供服务端评分选人的额度余量分项。
+        XCTAssertEqual(quota?["seven_day_pct"] as? Int, 55)
+        XCTAssertEqual(quota?["seven_day_reset_at"] as? Int, 1_700_000_500_000)
     }
 
     func testReviewProgress() throws {
