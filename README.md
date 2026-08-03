@@ -135,6 +135,7 @@ serverUrl、token，**保存即热重载**(自动按新配置重连)。
 | `globalPrompt` | | 全局 review 提示词（所有项目生效，单项目 `prompt` 优先）。支持占位符 `{{PR_NUM}}` `{{WORKTREE_PATH}}` `{{CI_STATUS}}` `{{PR_URL}}` `{{REPO}}` |
 | `reviewModel` | | claude 模型，默认 `claude-opus-4-8`（必须你账号有权限）|
 | `claudePath` | | claude 可执行路径，默认 `claude` |
+| `quotaClaudePath` | | 查额度（`claude -p /usage`）专用的可执行路径，默认同 `claudePath`。只有把 `claudePath` 指向了**非 Claude Code 的引擎/适配脚本**时才需要填：那种脚本不认 `/usage`，会把它当普通提问跑一整轮再被 25s 超时杀掉（白烧 token 且额度永远查不到），填真 claude 路径即可 |
 | `configPort` | | 本机配置页端口，默认 `8790` |
 | `worktreeMaxAgeDays` | | 超过这个天数没动过的 worktree 自动清理，默认 14 |
 

@@ -119,4 +119,27 @@ final class ConfigStoreTests: XCTestCase {
         let reloaded = ConfigStore.load()
         XCTAssertEqual(reloaded.serverUrl, "wss://x")
     }
+
+    /// quotaClaudePath: 留空 = 复用 claudePath(默认行为), 填了才单独用它查额度;
+    /// 空值不落盘, 与 Node 版 cfg.quotaClaudePath 语义一致。
+    func testQuotaClaudePathFallsBackToClaudePath() throws {
+        var cfg = ConfigStore.load()
+        cfg.claudePath = "/opt/engines/omp-adapter.sh"
+        XCTAssertEqual(cfg.effectiveQuotaClaudePath, "/opt/engines/omp-adapter.sh", "未填 = 查额度也用 claudePath")
+        cfg.quotaClaudePath = "  "
+        XCTAssertEqual(cfg.effectiveQuotaClaudePath, "/opt/engines/omp-adapter.sh", "只有空白 = 视为未填")
+        try ConfigStore.save(cfg)
+        var obj = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: tmpConfig))) as! [String: Any]
+        XCTAssertNil(obj["quotaClaudePath"], "空值不落盘")
+
+        cfg.quotaClaudePath = "/Users/x/.local/bin/claude"
+        try ConfigStore.save(cfg)
+        obj = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: tmpConfig))) as! [String: Any]
+        XCTAssertEqual(obj["quotaClaudePath"] as? String, "/Users/x/.local/bin/claude")
+        let reloaded = ConfigStore.load()
+        XCTAssertEqual(reloaded.effectiveQuotaClaudePath, "/Users/x/.local/bin/claude")
+        XCTAssertEqual(reloaded.claudePath, "/opt/engines/omp-adapter.sh", "review 仍走 claudePath")
+    }
 }

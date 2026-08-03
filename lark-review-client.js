@@ -67,6 +67,11 @@ function loadConfig() {
   cfg.heartbeatMs = cfg.heartbeatMs || 15000;
   cfg.worktreeMaxAgeDays = cfg.worktreeMaxAgeDays || 14;
   cfg.claudePath = cfg.claudePath || 'claude';
+  // 额度查询(`-p /usage`)用的可执行文件, 默认与 claudePath 同一个。
+  // /usage 是 Claude Code 独有的 slash command: 若 claudePath 指向别的引擎(或转发到别的引擎的适配脚本),
+  // 它会把 "/usage" 当普通提问跑一整轮再被 25s 超时杀掉(白烧 token 且永远查不到额度) →
+  // 这时把 quotaClaudePath 单独指向真 claude 可执行文件。
+  cfg.quotaClaudePath = (cfg.quotaClaudePath && String(cfg.quotaClaudePath).trim()) || cfg.claudePath;
   cfg.configPort = cfg.configPort || 8790;   // 本机配置页端口
   // review 超时(ms): 单次 claude 执行超过此时长自动终止并上报失败(交服务端改派), 避免卡死占住队列。
   // 默认 30min; 显式设 0 = 不限时(旧行为)。与 macapp reviewTimeoutMs 对齐。
@@ -300,25 +305,37 @@ function parseUsageText(text) {
   if (m) { out.seven_day_pct = parseInt(m[1], 10); out.seven_day_reset_at = parseUsageReset(m[2]); }
   return (out.five_hour_pct != null || out.seven_day_pct != null) ? out : null;
 }
-// 跑 `claude -p /usage --output-format json` 并解析。成功→更新缓存; 失败/超时→不动(变旧后失效)。
+// 额度查询失败时给出可行动的原因(别笼统甩"解析失败": 排查全靠这一行日志)。
+function usageFailReason(code, killed, text, stderr) {
+  const cut = (s) => String(s).replace(/\s+/g, ' ').trim().slice(0, 160);
+  const notClaude = `(/usage 是 Claude Code 独有能力: 若它不是真 claude —— 例如转发到别的引擎的适配脚本 —— 请把配置里的 quotaClaudePath 指向真 claude)`;
+  if (killed) return `25s 超时被终止, 它可能把 "/usage" 当普通提问在跑 ${notClaude}${stderr ? `; stderr: ${cut(stderr)}` : ''}`;
+  if (code !== 0) return `退出码 ${code} ${notClaude}${stderr ? `; stderr: ${cut(stderr)}` : ''}`;
+  if (!String(text).trim()) return `无输出 ${notClaude}${stderr ? `; stderr: ${cut(stderr)}` : ''}`;
+  return `输出里没有 session/week 百分比 —— claude 未登录 / OAuth token 过期且刷新失败 / 额度接口被限流时,`
+       + ` /usage 只会打印"用量构成"而不带百分比行; 手工跑一次 \`claude -p /usage\` 复现: ${cut(text)}`;
+}
+
+// 跑 `<quotaClaudePath> -p /usage --output-format json` 并解析。成功→更新缓存; 失败/超时→不动(变旧后失效)。
 // 返回 Promise(总 resolve, 不 reject), 供"派活前先查一次"await。
 function pollUsage() {
   return new Promise((resolve) => {
-    let done = false, stdout = '', child, to;
+    let done = false, stdout = '', stderr = '', killed = false, errored = false, child, to;
     const finish = () => { if (done) return; done = true; clearTimeout(to); resolve(); };
     // --dangerously-skip-permissions: 跳过 claude 沙盒/权限初始化, 避免它经 sandboxd 探测 Apple Music/
     // 媒体库等 → 免得给成员弹"访问媒体库"授权(那是 claude 行为被归因到本 app, 与 review 无关)。/usage 只读本地, 无副作用。
-    try { child = spawn(cfg.claudePath, ['-p', '/usage', '--output-format', 'json', '--dangerously-skip-permissions'], { stdio: ['ignore', 'pipe', 'ignore'] }); }
+    try { child = spawn(cfg.quotaClaudePath, ['-p', '/usage', '--output-format', 'json', '--dangerously-skip-permissions'], { stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (e) { logErr(`查额度(/usage)启动失败: ${e.message}`); return resolve(); }
-    to = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} finish(); }, 25000);
-    if (child.stdout) child.stdout.on('data', (d) => { stdout += d; });
-    child.on('error', (e) => { logErr(`查额度(/usage)出错: ${e.message}`); finish(); });
-    child.on('close', () => {
+    to = setTimeout(() => { killed = true; try { child.kill('SIGKILL'); } catch {} finish(); }, 25000);
+    if (child.stdout) child.stdout.on('data', (d) => { if (stdout.length < 65536) stdout += d; });
+    if (child.stderr) child.stderr.on('data', (d) => { if (stderr.length < 4096) stderr += d; });   // 只留头部, 失败时贴进日志
+    child.on('error', (e) => { errored = true; logErr(`查额度(/usage)拉起失败[${cfg.quotaClaudePath}]: ${e.message}`); finish(); });
+    child.on('close', (code) => {
       let text = stdout;
       try { const j = JSON.parse(stdout); if (j && typeof j.result === 'string') text = j.result; } catch { /* 非 json 按纯文本 */ }
       const parsed = parseUsageText(text);
       if (parsed) { usageQuota = parsed; usageQuotaAt = Date.now(); sendQuota(); }   // 刷新后独立上报(不挂心跳)
-      else logErr('查额度(/usage): 未解析出 session/week 百分比(claude 版本过旧?)');
+      else if (!errored) logErr(`查额度(/usage)失败[${cfg.quotaClaudePath}]: ${usageFailReason(code, killed, text, stderr)}`);   // 拉起失败已单独报过
       finish();
     });
   });

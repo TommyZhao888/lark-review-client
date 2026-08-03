@@ -128,23 +128,38 @@ final class QuotaMonitor {
 
     // MARK: - `claude -p /usage` 查额度(headless, 零 token, 自带重置时间)
 
-    /// 跑 `claude -p /usage --output-format json`, 解析 session(5小时)/week 百分比+重置时间, 更新缓存。
+    /// 跑 `<quotaClaudePath> -p /usage --output-format json`, 解析 session(5小时)/week 百分比+重置时间, 更新缓存。
     /// 返回是否刷新出新鲜额度(供上层决定要不要独立上报一次 .quota; 与 Node 版"仅解析成功才 send"对齐)。
     @discardableResult
     func refreshUsage(config: Config) async -> Bool {
         // --dangerously-skip-permissions: 跳过 claude 沙盒/权限初始化, 避免经 sandboxd 探测 Apple Music/媒体库
         // → 免得给成员弹"访问媒体库"授权(claude 行为被归因到本 app, 与 review 无关)。/usage 只读本地无副作用。
-        let r = await ProcessRunner.run(config.claudePath, ["-p", "/usage", "--output-format", "json", "--dangerously-skip-permissions"])
-        guard r.code == 0 else { LogStore.shared.log("查额度(/usage)退出码 \(r.code)"); return false }
+        let bin = config.effectiveQuotaClaudePath
+        // 25s 超时(对齐 Node 版): 非 claude 的引擎会把 "/usage" 当普通提问跑一整轮, 不设上限会把这条轮询卡死。
+        let r = await ProcessRunner.run(bin, ["-p", "/usage", "--output-format", "json", "--dangerously-skip-permissions"],
+                                        timeoutMs: 25000)
         var text = r.stdout
         if let data = r.stdout.data(using: .utf8),
            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
            let res = obj["result"] as? String { text = res }
-        let ok = parseUsageText(text)
-        if !ok {
-            LogStore.shared.log("查额度(/usage): 未解析出 session/week 百分比(claude 版本过旧?)")
+        if parseUsageText(text) { return true }
+        LogStore.shared.log("查额度(/usage)失败[\(bin)]: \(usageFailReason(code: r.code, text: text, stderr: r.stderr))")
+        return false
+    }
+
+    /// 额度查询失败时给出可行动的原因(别笼统甩"解析失败": 排查全靠这一行日志)。与 Node 版 usageFailReason 对齐。
+    private func usageFailReason(code: Int32, text: String, stderr: String) -> String {
+        func cut(_ s: String) -> String {
+            String(s.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(160))
         }
-        return ok
+        let notClaude = "(/usage 是 Claude Code 独有能力: 若它不是真 claude —— 例如转发到别的引擎的适配脚本 ——"
+                      + " 请把配置里的 quotaClaudePath 指向真 claude)"
+        let errNote = stderr.isEmpty ? "" : "; stderr: \(cut(stderr))"
+        if code == 124 { return "25s 超时被终止, 它可能把 \"/usage\" 当普通提问在跑 \(notClaude)\(errNote)" }
+        if code != 0 { return "退出码 \(code) \(notClaude)\(errNote)" }
+        if cut(text).isEmpty { return "无输出 \(notClaude)\(errNote)" }
+        return "输出里没有 session/week 百分比 —— claude 未登录 / OAuth token 过期且刷新失败 / 额度接口被限流时,"
+             + " /usage 只会打印\"用量构成\"而不带百分比行; 手工跑一次 `claude -p /usage` 复现: \(cut(text))"
     }
 
     /// 解析 /usage 文本: "Current session: N% used · resets ..."(5小时窗)/ "Current week (all models): M% used · resets ..."。

@@ -1,5 +1,22 @@
 # 更新说明
 
+## v1.9.2 — 未发布
+
+> 修复「查额度(/usage)」永远失败:日志把原因猜成"claude 版本过旧",实际另有两种成因,且非 claude 引擎下
+> 每 10 分钟白烧一轮 token。双端(Node + macapp)对齐。
+
+- **额度查询不再假定 `claudePath` 就是 Claude Code**。新增可选 `quotaClaudePath`(默认 = `claudePath`):
+  `/usage` 是 Claude Code 独有的 slash command,把 `claudePath` 指向别的引擎(或转发到别的引擎的适配脚本)后,
+  它会把 `"/usage"` 当**普通提问跑一整轮**,25s 超时被 SIGKILL → 输出为空、额度永远查不到,
+  而且每 10 分钟白烧一次模型调用。把 `quotaClaudePath` 指向真 claude 即可,review 仍走 `claudePath`。
+- **失败日志给真原因,不再瞎猜"claude 版本过旧"**。现在按失败形态分别打印:超时被终止 / 退出码 + stderr /
+  无输出 / 输出里没有百分比行,并附输出片段与可执行文件路径(Node 起也开始收 stderr,以前是丢掉的)。
+  实测另一种成因:claude **OAuth token 过期且刷新失败**(或额度接口被限流)时,`claude -p /usage` 会照常
+  退出 0、只打印"用量构成"而**不带** `Current session: N% used` 行 —— 与版本新旧无关。
+- **macapp 的 `/usage` 调用补上 25s 超时**(此前 `timeoutMs: 0` = 不限时):非 claude 引擎会把这条轮询挂死。
+- 解析逻辑不变:claude 2.1.220 的 `Current session: N% used · resets …` / `Current week (all models): …`
+  与现有正则完全匹配(已实测)。
+
 ## v1.9.1 — 2026-08-03
 
 > Mac App 自更新的下载阶段看得见进度了。仅 UI/展示改动,协议与 review 执行逻辑零变化。
