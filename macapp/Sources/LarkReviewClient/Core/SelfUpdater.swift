@@ -26,6 +26,13 @@ enum SelfUpdater {
         var retryable: Bool = false
     }
 
+    /// dmg 下载进度：只有下载阶段有，其余阶段回报 nil（UI 画不定进度小转圈）。
+    struct DownloadProgress: Equatable {
+        var received: Int64
+        var total: Int64          // 服务器未给 Content-Length 时为 0
+        var fraction: Double?     // total>0 时 0...1；未知时 nil（UI 不画确定进度条）
+    }
+
     // ---------- 纯函数（无网络/Bundle 依赖，供单测） ----------
 
     /// 去空白、去可选 v/V 前缀；空串返回 nil。
@@ -39,6 +46,26 @@ enum SelfUpdater {
     static func latestTag(fromJSON data: Data) -> String? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return obj["tag_name"] as? String
+    }
+
+    /// 已下载/总大小 → 0...1（越界夹回）；total 未知(≤0) 或 received<0 时返回 nil = 画不定进度。
+    static func fraction(received: Int64, total: Int64) -> Double? {
+        guard total > 0, received >= 0 else { return nil }
+        return min(1.0, Double(received) / Double(total))
+    }
+
+    /// 字节数人读文案：≥1MB → "12.3 MB"，否则 "870 KB"
+    /// （ByteCountFormatter 随系统语言/进制变体太多，进度条文案要稳定所以手写）。
+    static func formatBytes(_ n: Int64) -> String {
+        let bytes = max(0, n)
+        let mb = Double(bytes) / 1_048_576
+        if mb >= 1 { return String(format: "%.1f MB", mb) }
+        return String(format: "%.0f KB", (Double(bytes) / 1024).rounded())
+    }
+
+    /// 进度副文案："12.3 MB / 29.4 MB"；total 未知时只给已下载量。
+    static func progressText(received: Int64, total: Int64) -> String {
+        total > 0 ? "\(formatBytes(received)) / \(formatBytes(total))" : formatBytes(received)
     }
 
     /// Gatekeeper 把带 quarantine 的 app 搬去只读随机挂载点运行——该路径不可原地替换。
@@ -114,20 +141,23 @@ enum SelfUpdater {
     // ---------- 主流程 ----------
 
     /// 执行更新：定版本 → 下载 dmg → 挂载取 app → 校验 → 原地替换 → 重启。
-    /// onStep 回报步骤文案（非主线程调用，调用方自行切主线程更新 UI）。
+    /// onStatus 回报「步骤文案 + 下载进度(仅下载阶段有)」的完整快照（非主线程调用，
+    /// 调用方自行切主线程更新 UI；后到的快照覆盖先到的，不会出现阶段与进度错配的拼接态）。
     /// 返回结果；ok && changed 时已触发重启（进程即将退出）。
-    static func run(targetVersion: String?, onStep: @escaping (String) -> Void) async -> UpdateOutcome {
-        let session: URLSession = {
+    static func run(targetVersion: String?,
+                    onStatus: @escaping (String, DownloadProgress?) -> Void) async -> UpdateOutcome {
+        let sessionConfig: URLSessionConfiguration = {
             let cfg = URLSessionConfiguration.ephemeral
             cfg.timeoutIntervalForRequest = 60
             cfg.timeoutIntervalForResource = 600
-            return URLSession(configuration: cfg)
+            return cfg
         }()
+        let session = URLSession(configuration: sessionConfig)
 
         // 1. 定版本：服务端 recommended 优先（服务端可固定推荐某 tag），缺失回退查最新 release。
         var version = normalizeVersion(targetVersion)
         if version == nil {
-            onStep("查询最新版本…")
+            onStatus("查询最新版本…", nil)
             if let (data, resp) = try? await session.data(from: latestReleaseAPI),
                (resp as? HTTPURLResponse)?.statusCode == 200 {
                 version = normalizeVersion(latestTag(fromJSON: data))
@@ -165,13 +195,18 @@ enum SelfUpdater {
         }
 
         // 4. 下载 dmg。LARK_REVIEW_UPDATE_DMG_URL 为 e2e 测试钩子（本地假 hub + 假包）。
-        onStep("下载 v\(version) 安装包…")
+        //    dmg 是整个更新里最慢的一步 → 回报确定进度，UI 画进度条。
+        let downloadStep = "下载 v\(version) 安装包…"
+        onStatus(downloadStep, nil)
         let url = ProcessInfo.processInfo.environment["LARK_REVIEW_UPDATE_DMG_URL"]
             .flatMap { URL(string: $0) } ?? dmgURL(version: version)
         let dmgPath = workdir + "/update.dmg"
         do {
-            let (tmp, resp) = try await session.download(from: url)
-            let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            let downloader = DMGDownloader(destPath: dmgPath) { received, total in
+                onStatus(downloadStep, DownloadProgress(received: received, total: total,
+                                                        fraction: fraction(received: received, total: total)))
+            }
+            let status = try await downloader.run(url: url, config: sessionConfig)
             if status == 404 {
                 await cleanup()
                 return UpdateOutcome(ok: false, changed: false,
@@ -182,14 +217,15 @@ enum SelfUpdater {
                 await cleanup()
                 return UpdateOutcome(ok: false, changed: false, message: "下载安装包失败(HTTP \(status)): \(url.absoluteString)")
             }
-            try fm.moveItem(atPath: tmp.path, toPath: dmgPath)
+            let bytes = ((try? fm.attributesOfItem(atPath: dmgPath))?[.size] as? NSNumber)?.int64Value ?? 0
+            LogStore.shared.log("self-update: 安装包下载完成 \(formatBytes(bytes))")
         } catch {
             await cleanup()
             return UpdateOutcome(ok: false, changed: false, message: "下载安装包失败: \(error.localizedDescription)")
         }
 
         // 5. 挂载（UDZO checksum 校验自动兜住下载损坏，勿加 -noverify）。
-        onStep("解包安装包…")
+        onStatus("解包安装包…", nil)
         let attach = await ProcessRunner.run("/usr/bin/hdiutil",
             ["attach", dmgPath, "-nobrowse", "-readonly", "-mountpoint", mnt])
         if attach.code != 0 {
@@ -206,7 +242,7 @@ enum SelfUpdater {
         }
 
         // 7. 暂存到与安装目录同卷的临时目录（同卷保证 rename 原子；ditto 保 symlink/xattr/签名）。
-        onStep("安装新版本…")
+        onStatus("安装新版本…", nil)
         let stagingDir: String
         do {
             stagingDir = try fm.url(for: .itemReplacementDirectory, in: .userDomainMask,
@@ -254,7 +290,7 @@ enum SelfUpdater {
         }
 
         // 12. 原地替换。
-        onStep("替换旧版本…")
+        onStatus("替换旧版本…", nil)
         let aside = stagingDir + "/LarkReviewClient-old.app"
         if let err = swapBundle(newApp: staged, dest: dest, aside: aside) {
             cleanupStaging()
@@ -263,7 +299,7 @@ enum SelfUpdater {
         cleanupStaging()
 
         // 13. 重启（进程即将退出）。
-        onStep("重启中…")
+        onStatus("重启中…", nil)
         await relaunch(appPath: dest)
         return UpdateOutcome(ok: true, changed: true, message: "更新完成，正在重启…")
     }
@@ -317,6 +353,89 @@ enum SelfUpdater {
         try? p.run()   // detached，不等待
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             NSApp.terminate(nil)
+        }
+    }
+
+    /// 带进度回报的 dmg 下载：session 级 delegate + downloadTask + continuation。
+    /// 为什么不用更短的 `session.download(from:delegate:)`：实测（macOS 27）传给它的
+    /// per-task delegate 收不到 didWriteData 进度回调（下载能成功但一次进度都不报），
+    /// 只有把 delegate 挂在 session 上才有进度。改回便捷 API 前请先验证进度是否还在。
+    /// 回调落在 session 的串行 delegate 队列上，故 @unchecked Sendable、内部状态无需加锁；
+    /// 进度节流到「百分点变化 或 ≥200ms」一次——不节流会几十 KB 一次地刷 MainActor。
+    private final class DMGDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+        private let destPath: String
+        private let onProgress: (Int64, Int64) -> Void
+        private var session: URLSession?
+        private var continuation: CheckedContinuation<Int, Error>?
+        private var status = -1
+        private var moveError: Error?
+        private var finished = false            // 防重复 resume（invalidate 后还会来 didBecomeInvalid）
+        private var lastPercent = -1
+        private var lastAt = Date.distantPast
+        private var loggedTotal = false
+
+        init(destPath: String, onProgress: @escaping (Int64, Int64) -> Void) {
+            self.destPath = destPath
+            self.onProgress = onProgress
+        }
+
+        /// 下载到 destPath；返回 HTTP 状态码（404/非 200 由调用方给文案），网络层失败抛错。
+        func run(url: URL, config: URLSessionConfiguration) async throws -> Int {
+            try await withCheckedThrowingContinuation { cont in
+                continuation = cont           // 必在 resume() 之前设好，回调才有 continuation 可用
+                let s = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+                session = s
+                s.downloadTask(with: url).resume()
+            }
+        }
+
+        private func finish(_ result: Result<Int, Error>) {
+            guard !finished else { return }
+            finished = true
+            let cont = continuation
+            continuation = nil
+            session?.finishTasksAndInvalidate()   // 断开 session 对 delegate(self) 的强引用
+            session = nil
+            switch result {
+            case .success(let code): cont?.resume(returning: code)
+            case .failure(let err): cont?.resume(throwing: err)
+            }
+        }
+
+        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                        didWriteData bytesWritten: Int64,
+                        totalBytesWritten written: Int64,
+                        totalBytesExpectedToWrite expected: Int64) {
+            let total = expected > 0 ? expected : 0   // 未知长度(NSURLSessionTransferSizeUnknown=-1) → 0
+            if !loggedTotal, total > 0 {
+                loggedTotal = true
+                LogStore.shared.log("self-update: 安装包大小 \(SelfUpdater.formatBytes(total))，开始下载")
+            }
+            let percent = total > 0 ? Int(Double(written) / Double(total) * 100) : -1
+            let now = Date()
+            guard percent != lastPercent || now.timeIntervalSince(lastAt) >= 0.2 else { return }
+            lastPercent = percent
+            lastAt = now
+            onProgress(written, total)
+        }
+
+        func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                        didFinishDownloadingTo location: URL) {
+            status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? -1
+            // 本回调返回后临时文件即被删 → 必须在这里同步搬走。
+            do {
+                let fm = FileManager.default
+                if fm.fileExists(atPath: destPath) { try fm.removeItem(atPath: destPath) }
+                try fm.moveItem(atPath: location.path, toPath: destPath)
+            } catch {
+                moveError = error
+            }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error { finish(.failure(error)); return }
+            if let moveError { finish(.failure(moveError)); return }
+            finish(.success(status))
         }
     }
 }

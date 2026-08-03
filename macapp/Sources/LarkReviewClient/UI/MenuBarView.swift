@@ -83,11 +83,8 @@ struct MenuBarView: View {
             // 一键自更新：从 Releases 下载新版 dmg 原地替换 + 重启（任意安装位置可用）。
             let busy = state.runningJob != nil || !state.queuedJobs.isEmpty
             switch state.updatePhase {
-            case .running(let step):
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text(step).font(.caption)
-                }
+            case .running(let step, let progress):
+                updateProgressRows(step: step, progress: progress)
             case .failed(let reason):
                 Text("更新失败：\(reason)").font(.caption).foregroundStyle(.red)
                 updateButton("重试更新并重启", disabled: busy)
@@ -102,6 +99,34 @@ struct MenuBarView: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.yellow.opacity(0.15), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// 更新进行中的两/三行展示：下载阶段有确定进度 → 百分比 + 线性进度条 + 已下载/总大小；
+    /// 其余阶段（查询版本/解包/安装/替换/重启）没有可算的分母 → 保持原来的小转圈 + 阶段文案。
+    @ViewBuilder
+    private func updateProgressRows(step: String, progress: SelfUpdater.DownloadProgress?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if progress?.fraction == nil {
+                    ProgressView().controlSize(.small)
+                }
+                Text(step).font(.caption)
+                Spacer()
+                if let f = progress?.fraction {
+                    Text("\(Int((f * 100).rounded()))%")
+                        .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+                }
+            }
+            if let p = progress {
+                if let f = p.fraction {
+                    ProgressView(value: f)
+                        .progressViewStyle(.linear)
+                        .controlSize(.small)
+                }
+                Text(SelfUpdater.progressText(received: p.received, total: p.total))
+                    .font(.caption2).monospacedDigit().foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func updateButton(_ title: String, disabled: Bool) -> some View {

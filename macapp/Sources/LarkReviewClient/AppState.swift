@@ -31,7 +31,8 @@ final class AppState {
     /// 自更新阶段（UI 展示 + 防重复触发）。
     enum UpdatePhase: Equatable {
         case idle
-        case running(String)   // 进行中，附当前步骤文案（拉取/编译…）
+        /// 进行中：当前步骤文案（下载/解包/替换…）+ 下载进度（仅下载阶段有，其余为 nil）。
+        case running(String, SelfUpdater.DownloadProgress?)
         case failed(String)    // 失败，附原因
     }
 
