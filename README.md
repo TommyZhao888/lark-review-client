@@ -208,6 +208,19 @@ ln -sf "$PWD/lionreview.5s.sh" "<SwiftBar 插件目录>/lionreview.5s.sh"
 > ./run-client.sh restart
 > ```
 
+> **改过客户端源码怎么办**：一键更新会先把本地改动 `git stash` 起来、同时落盘一份补丁到
+> `~/.lark-review-client/patches/local-<时间戳>.patch`，更新完再自动还原。**更新不会因为你动过代码而失败。**
+> 万一改动和新版本冲突而还原不了，客户端会停在**干净的新版本**上照常运行（绝不留冲突标记，否则进程起不来），
+> 并在配置页显示告警和找回步骤——改动在补丁和 `git stash list` 里存了两份，不会丢。
+>
+> ```bash
+> cd <客户端目录>
+> git apply --3way ~/.lark-review-client/patches/local-<时间戳>.patch   # 或 git stash pop，二选一
+> ```
+>
+> 更省事的做法：**跟本机环境相关的东西（claude 路径、token、repo 路径…）本来就在 `~/.lark-review-client.json` 里，
+> 不在仓库中、不受更新影响。需要改行为优先提配置项，别改源码。**
+
 ## 安全
 
 - `token` 等同你的身份凭证，别泄露、别提交进 git。

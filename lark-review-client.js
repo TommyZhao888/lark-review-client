@@ -36,8 +36,8 @@ function detectHostname() {
   return h;
 }
 
-// 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.9.1';
+// 客户端版本：升级功能时手动 +1（与 package.json / package-lock.json 保持一致）。服务端据此判断是否提示升级。
+const CLIENT_VERSION = '1.9.2';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -1211,8 +1211,19 @@ function reloadAndReconnect() {
 }
 
 // ---------- 客户端自更新(从 lark-review-client 仓库 git pull + 重启; 失败给手动步骤) ----------
+//
+// 成员是 git clone 装的客户端(见 README/QUICKSTART)。`git pull --ff-only` 在「本地改过的文件正好被这次
+// 更新改到」时会拒绝执行(实测: 无交集时其实能过) —— 而每次发版必动 lark-review-client.js/config-page.html,
+// 所以成员只要改过客户端主文件, 一键更新就是必挂。这里按三条不变量处理本地改动:
+//   I1 更新永远推进: 不因本地改动而失败(最坏是"更新成功但改动没自动恢复")。
+//   I2 改动永不丢失: 先落盘成人类可读的 .patch, 再 git stash —— 双保险。
+//   I3 更新后一定能跑: 绝不把带冲突标记的源码留在工作区(那是 node 语法错误 = 客户端起不来)。
+// 注意与「本地环境差异」区分: 环境相关的东西(claudePath/token/repo 路径…)本来就在 ~/.lark-review-client.json,
+// 不在仓库里, 不受更新影响; 需要改行为时优先加配置项, 而不是改源码。
 const CLIENT_DIR = __dirname;
 const UPDATE_REPO_URL = 'https://github.com/TommyZhao888/lark-review-client';
+const LOCAL_PATCH_DIR = path.join(os.homedir(), '.lark-review-client', 'patches');
+const git = (...args) => run('git', ['-C', CLIENT_DIR, ...args]);
 function manualUpdateSteps() {
   return [
     `cd "${CLIENT_DIR}"`,
@@ -1222,22 +1233,87 @@ function manualUpdateSteps() {
   ];
 }
 async function selfUpdate() {
-  const chk = await run('git', ['-C', CLIENT_DIR, 'rev-parse', '--is-inside-work-tree']);
+  const chk = await git('rev-parse', '--is-inside-work-tree');
   if (chk.code !== 0 || String(chk.stdout).trim() !== 'true') {
     return { ok: false, manual: true, reason: 'not_git', detail: `客户端目录不是 git 仓库(${CLIENT_DIR})，无法自动更新。`, steps: manualUpdateSteps() };
   }
-  const before = (await run('git', ['-C', CLIENT_DIR, 'rev-parse', 'HEAD'])).stdout.trim();
-  const pull = await run('git', ['-C', CLIENT_DIR, 'pull', '--ff-only']);
-  if (pull.code !== 0) {
-    return { ok: false, manual: true, reason: 'pull_failed', detail: (pull.stdout + pull.stderr).trim().slice(-600), steps: manualUpdateSteps() };
+  // 先 fetch 再判断能不能快进 —— 所有"注定失败"的情况都在动工作区之前查出来, 免得白 stash 一场。
+  const fetched = await git('fetch', '--quiet');
+  if (fetched.code !== 0) {
+    return { ok: false, manual: true, reason: 'fetch_failed', detail: (fetched.stdout + fetched.stderr).trim().slice(-600) || '拉取远端失败(网络?)', steps: manualUpdateSteps() };
   }
-  const after = (await run('git', ['-C', CLIENT_DIR, 'rev-parse', 'HEAD'])).stdout.trim();
-  if (before === after) return { ok: true, changed: false, message: '已是最新版本，无需更新。' };
+  const up = await git('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}');
+  const upstream = up.code === 0 ? up.stdout.trim() : '';
+  if (!upstream) {
+    return { ok: false, manual: true, reason: 'no_upstream', detail: '当前分支没有跟踪远端分支, 无法判断该更新到哪个版本。', steps: manualUpdateSteps() };
+  }
+  const before = (await git('rev-parse', 'HEAD')).stdout.trim();
+  const target = (await git('rev-parse', upstream)).stdout.trim();
+  if (before === target) return { ok: true, changed: false, message: '已是最新版本，无需更新。' };
+  // 本地有未推送的提交 → 快进式更新做不到, 且不该悄悄丢掉它们。明说 + 给 rebase 步骤, 工作区一个字节都不动。
+  const ahead = Number((await git('rev-list', '--count', `${upstream}..HEAD`)).stdout.trim()) || 0;
+  if (ahead > 0) {
+    return {
+      ok: false, manual: true, reason: 'diverged',
+      detail: `本地有 ${ahead} 个未推送的提交, 快进式更新会覆盖它们, 已中止(工作区未改动)。`,
+      steps: [`cd "${CLIENT_DIR}"`, 'git pull --rebase        # 把本地提交挪到新版本之上, 有冲突就地解决', 'npm install --omit=dev', './run-client.sh restart'],
+    };
+  }
+  // 工作区脏(不含 .gitignore 忽略的 config.json/日志/node_modules) → 落盘补丁 + stash, 更新完再还回来。
+  const dirty = (await git('status', '--porcelain')).stdout.trim();
+  let local = null;
+  if (dirty) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const st = await git('stash', 'push', '-u', '-m', `lark-review-client auto-update ${stamp}`);
+    if (st.code !== 0) {   // 暂存不了就别硬更新, 否则等于替用户丢改动
+      return { ok: false, manual: true, reason: 'stash_failed', detail: `本地有改动且无法暂存: ${(st.stdout + st.stderr).trim().slice(-400)}`, steps: manualUpdateSteps() };
+    }
+    local = { stashed: true, patch: null };
+    // 落盘一份人类可读的补丁: stash 是 git 内部状态, 成员未必会用; 补丁是他能直接看/直接 apply 的东西。
+    try {
+      fs.mkdirSync(LOCAL_PATCH_DIR, { recursive: true });
+      const pf = path.join(LOCAL_PATCH_DIR, `local-${stamp}.patch`);
+      let p = await git('stash', 'show', '-p', '--include-untracked', 'stash@{0}');
+      if (p.code !== 0) p = await git('stash', 'show', '-p', 'stash@{0}');   // 老 git 不认 --include-untracked
+      fs.writeFileSync(pf, p.stdout);
+      local.patch = pf;
+    } catch (e) { logErr(`self-update: 本地改动补丁写盘失败(${e.message}), 改动仍在 git stash 里`); }
+    log(`self-update: 本地有改动, 已暂存${local.patch ? ` + 落盘 ${local.patch}` : ''}`);
+  }
+  const merged = await git('merge', '--ff-only', target);
+  if (merged.code !== 0) {   // 已 fetch/已确认可快进/工作区已干净, 走到这基本只剩磁盘或钩子问题: 原样还回去
+    if (local) await git('stash', 'pop');
+    return { ok: false, manual: true, reason: 'pull_failed', detail: (merged.stdout + merged.stderr).trim().slice(-600), steps: manualUpdateSteps() };
+  }
+  const after = (await git('rev-parse', 'HEAD')).stdout.trim();
+  let warn = '', restoreSteps = null;
+  if (local) {
+    const pop = await git('stash', 'pop');
+    if (pop.code === 0) { local.restored = 'ok'; log('self-update: 本地改动已恢复'); }
+    else {
+      // I3: 冲突标记留在 lark-review-client.js 里 = 更新完客户端起不来。硬回到干净的新版本。
+      // pop 失败时 git 不会删 stash 条目, 加上落盘的补丁, 改动有两份备份, 这里可以放心 reset。
+      await git('reset', '--hard', after);
+      await git('clean', '-fd');   // 不带 -x: config.json / node_modules / 日志等被忽略的文件不动
+      local.restored = 'conflict';
+      warn = `本地改动与新版本冲突, 未自动恢复(客户端已按干净的新版本运行)。改动没丢: ${local.patch || 'git stash list 里第一条'}`;
+      restoreSteps = [
+        `cd "${CLIENT_DIR}"`,
+        local.patch ? `git apply --3way "${local.patch}"    # 或 git stash pop, 二选一, 然后手工解冲突` : 'git stash pop        # 然后手工解冲突',
+        '# 提示: 与本机环境相关的设置请写进 ~/.lark-review-client.json, 别改源码, 免得每次更新都冲突',
+      ];
+      logErr(`self-update: ${warn}`);
+    }
+  }
   log(`self-update: ${before.slice(0, 7)} → ${after.slice(0, 7)}，npm install + 重启`);
   const npm = await run('npm', ['install', '--omit=dev'], { cwd: CLIENT_DIR });   // 依赖可能变; best-effort
-  notify('🆙 客户端已更新', `${before.slice(0, 7)} → ${after.slice(0, 7)}，正在重启…`);
+  notify('🆙 客户端已更新', `${before.slice(0, 7)} → ${after.slice(0, 7)}${warn ? '(本地改动未自动恢复)' : ''}，正在重启…`);
   setTimeout(doRestart, 800);   // 先把响应回给页面, 再重启
-  return { ok: true, changed: true, before: before.slice(0, 7), after: after.slice(0, 7), npm_ok: npm.code === 0, message: '更新成功，正在重启客户端(几秒后自动重连)…' };
+  return {
+    ok: true, changed: true, before: before.slice(0, 7), after: after.slice(0, 7), npm_ok: npm.code === 0,
+    local, warn: warn || undefined, steps: restoreSteps || undefined,
+    message: '更新成功，正在重启客户端(几秒后自动重连)…',
+  };
 }
 
 function startConfigServer() {

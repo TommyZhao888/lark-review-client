@@ -1,9 +1,25 @@
 # 更新说明
 
-## v1.9.2 — 未发布
+## v1.9.2 — 2026-08-03
 
-> 修复「查额度(/usage)」永远失败:日志把原因猜成"claude 版本过旧",实际另有两种成因,且非 claude 引擎下
-> 每 10 分钟白烧一轮 token。双端(Node + macapp)对齐。
+> 两件事:①「一键更新」不再被本地改动卡死(Node 版);②修复「查额度(/usage)」永远失败——日志把原因
+> 猜成"claude 版本过旧",实际另有两种成因,且非 claude 引擎下每 10 分钟白烧一轮 token。
+
+### 一键更新不再被本地改动卡死(仅 Node 版; macapp 走 dmg 替换,不受影响)
+
+- **改过客户端源码的人也能一键更新了**。此前 `selfUpdate()` 只跑 `git pull --ff-only`:
+  只要你本地改过的文件正好被这次更新改到(而每次发版都会动 `lark-review-client.js`),git 就拒绝执行,
+  一键更新从此永久报错。现在按三条不变量处理:**更新永远推进** / **本地改动永不丢失** / **更新后一定能跑**。
+- 流程:工作区脏 → 先 `git stash -u` 暂存,并把改动**落盘成补丁**
+  `~/.lark-review-client/patches/local-<时间戳>.patch`(含 untracked 文件,可直接 `git apply --3way` 复用)
+  → 快进到新版本 → `git stash pop` 还原。还原冲突时**不留冲突标记**(那会让 node 直接语法错误、客户端起不来),
+  而是回到干净的新版本并在配置页显式告警:改动仍在补丁 + `git stash list` 两份备份里。
+- **本地有未推送的提交**时不再糊里糊涂失败,而是明确中止(工作区一个字节不动)并给出 `git pull --rebase` 步骤。
+  网络/远端问题(`fetch_failed`)、没有跟踪分支(`no_upstream`)也各自单独报,不再统一糊成 `pull_failed`。
+- 顺带提醒:**跟本机环境相关的东西(claude 路径、token、repo 路径…)本来就在 `~/.lark-review-client.json`,
+  不在仓库里、不受更新影响。需要改行为请优先提配置项,别改源码**——改源码的代价就是每次更新都要自己解冲突。
+
+### 额度查询(`/usage`)
 
 - **额度查询不再假定 `claudePath` 就是 Claude Code**。新增可选 `quotaClaudePath`(默认 = `claudePath`):
   `/usage` 是 Claude Code 独有的 slash command,把 `claudePath` 指向别的引擎(或转发到别的引擎的适配脚本)后,
