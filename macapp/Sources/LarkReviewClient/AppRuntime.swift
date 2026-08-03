@@ -127,19 +127,19 @@ final class AppRuntime {
             state.updatePhase = .failed("有 review 在跑或排队，等它跑完再更新")
             return
         }
-        state.updatePhase = .running("准备…")
+        state.updatePhase = .running("准备…", nil)
         LogStore.shared.log("self-update: 开始更新\(auto ? "（自动，检测到新版本且空闲）" : "（手动）")")
         let target = state.upgrade?.recommended
         Task { [weak self] in
-            let outcome = await SelfUpdater.run(targetVersion: target, onStep: { step in
-                Task { @MainActor in self?.state.updatePhase = .running(step) }
+            let outcome = await SelfUpdater.run(targetVersion: target, onStatus: { step, progress in
+                Task { @MainActor in self?.state.updatePhase = .running(step, progress) }
             })
             await MainActor.run {
                 guard let self else { return }
                 if outcome.ok {
                     LogStore.shared.log("self-update: \(outcome.message)")
                     if outcome.changed {
-                        self.state.updatePhase = .running("重启中…")   // relaunch 已触发，进程即将退出
+                        self.state.updatePhase = .running("重启中…", nil)   // relaunch 已触发，进程即将退出
                     } else {
                         self.state.updatePhase = .idle
                         self.notifications.notify("客户端已是最新", outcome.message)

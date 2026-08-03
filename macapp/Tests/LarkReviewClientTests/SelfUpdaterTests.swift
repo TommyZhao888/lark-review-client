@@ -38,6 +38,43 @@ final class SelfUpdaterTests: XCTestCase {
         XCTAssertNil(SelfUpdater.latestTag(fromJSON: Data(#"[1,2,3]"#.utf8)))
     }
 
+    // ---------- 下载进度（进度条的分子/分母与文案） ----------
+
+    func testFractionNormal() {
+        XCTAssertEqual(SelfUpdater.fraction(received: 0, total: 100), 0.0)
+        XCTAssertEqual(SelfUpdater.fraction(received: 25, total: 100), 0.25)
+        XCTAssertEqual(SelfUpdater.fraction(received: 100, total: 100), 1.0)
+    }
+
+    func testFractionUnknownOrBadTotal() {
+        // 服务器没给 Content-Length（total=0）或异常值 → nil = UI 画不定进度转圈
+        XCTAssertNil(SelfUpdater.fraction(received: 1024, total: 0))
+        XCTAssertNil(SelfUpdater.fraction(received: 1024, total: -1))
+        XCTAssertNil(SelfUpdater.fraction(received: -1, total: 100))
+    }
+
+    func testFractionClampsOvershoot() {
+        // 实测偶见 totalBytesWritten 略超 expected（分块/重定向），进度条不能超 100%
+        XCTAssertEqual(SelfUpdater.fraction(received: 120, total: 100), 1.0)
+    }
+
+    func testFormatBytes() {
+        XCTAssertEqual(SelfUpdater.formatBytes(0), "0 KB")
+        XCTAssertEqual(SelfUpdater.formatBytes(-5), "0 KB")          // 负数夹到 0，不出现 "-0 KB"
+        XCTAssertEqual(SelfUpdater.formatBytes(900), "1 KB")
+        XCTAssertEqual(SelfUpdater.formatBytes(1024), "1 KB")
+        XCTAssertEqual(SelfUpdater.formatBytes(1_048_576), "1.0 MB")
+        XCTAssertEqual(SelfUpdater.formatBytes(29_360_128), "28.0 MB")
+    }
+
+    func testProgressText() {
+        XCTAssertEqual(
+            SelfUpdater.progressText(received: 12_897_484, total: 30_828_134),
+            "12.3 MB / 29.4 MB")
+        // total 未知时只报已下载量（不显示 "/ 0 KB"）
+        XCTAssertEqual(SelfUpdater.progressText(received: 1_048_576, total: 0), "1.0 MB")
+    }
+
     // ---------- isTranslocated ----------
 
     func testIsTranslocated() {
