@@ -1,5 +1,38 @@
 # 更新说明
 
+## v1.9.2 — 2026-08-03
+
+> 两件事:①「一键更新」不再被本地改动卡死(Node 版);②修复「查额度(/usage)」永远失败——日志把原因
+> 猜成"claude 版本过旧",实际另有两种成因,且非 claude 引擎下每 10 分钟白烧一轮 token。
+
+### 一键更新不再被本地改动卡死(仅 Node 版; macapp 走 dmg 替换,不受影响)
+
+- **改过客户端源码的人也能一键更新了**。此前 `selfUpdate()` 只跑 `git pull --ff-only`:
+  只要你本地改过的文件正好被这次更新改到(而每次发版都会动 `lark-review-client.js`),git 就拒绝执行,
+  一键更新从此永久报错。现在按三条不变量处理:**更新永远推进** / **本地改动永不丢失** / **更新后一定能跑**。
+- 流程:工作区脏 → 先 `git stash -u` 暂存,并把改动**落盘成补丁**
+  `~/.lark-review-client/patches/local-<时间戳>.patch`(含 untracked 文件,可直接 `git apply --3way` 复用)
+  → 快进到新版本 → `git stash pop` 还原。还原冲突时**不留冲突标记**(那会让 node 直接语法错误、客户端起不来),
+  而是回到干净的新版本并在配置页显式告警:改动仍在补丁 + `git stash list` 两份备份里。
+- **本地有未推送的提交**时不再糊里糊涂失败,而是明确中止(工作区一个字节不动)并给出 `git pull --rebase` 步骤。
+  网络/远端问题(`fetch_failed`)、没有跟踪分支(`no_upstream`)也各自单独报,不再统一糊成 `pull_failed`。
+- 顺带提醒:**跟本机环境相关的东西(claude 路径、token、repo 路径…)本来就在 `~/.lark-review-client.json`,
+  不在仓库里、不受更新影响。需要改行为请优先提配置项,别改源码**——改源码的代价就是每次更新都要自己解冲突。
+
+### 额度查询(`/usage`)
+
+- **额度查询不再假定 `claudePath` 就是 Claude Code**。新增可选 `quotaClaudePath`(默认 = `claudePath`):
+  `/usage` 是 Claude Code 独有的 slash command,把 `claudePath` 指向别的引擎(或转发到别的引擎的适配脚本)后,
+  它会把 `"/usage"` 当**普通提问跑一整轮**,25s 超时被 SIGKILL → 输出为空、额度永远查不到,
+  而且每 10 分钟白烧一次模型调用。把 `quotaClaudePath` 指向真 claude 即可,review 仍走 `claudePath`。
+- **失败日志给真原因,不再瞎猜"claude 版本过旧"**。现在按失败形态分别打印:超时被终止 / 退出码 + stderr /
+  无输出 / 输出里没有百分比行,并附输出片段与可执行文件路径(Node 起也开始收 stderr,以前是丢掉的)。
+  实测另一种成因:claude **OAuth token 过期且刷新失败**(或额度接口被限流)时,`claude -p /usage` 会照常
+  退出 0、只打印"用量构成"而**不带** `Current session: N% used` 行 —— 与版本新旧无关。
+- **macapp 的 `/usage` 调用补上 25s 超时**(此前 `timeoutMs: 0` = 不限时):非 claude 引擎会把这条轮询挂死。
+- 解析逻辑不变:claude 2.1.220 的 `Current session: N% used · resets …` / `Current week (all models): …`
+  与现有正则完全匹配(已实测)。
+
 ## v1.9.1 — 2026-08-03
 
 > Mac App 自更新的下载阶段看得见进度了。仅 UI/展示改动,协议与 review 执行逻辑零变化。

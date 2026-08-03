@@ -36,8 +36,8 @@ function detectHostname() {
   return h;
 }
 
-// 客户端版本：升级功能时手动 +1（与 package.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.9.1';
+// 客户端版本：升级功能时手动 +1（与 package.json / package-lock.json 保持一致）。服务端据此判断是否提示升级。
+const CLIENT_VERSION = '1.9.2';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -67,6 +67,11 @@ function loadConfig() {
   cfg.heartbeatMs = cfg.heartbeatMs || 15000;
   cfg.worktreeMaxAgeDays = cfg.worktreeMaxAgeDays || 14;
   cfg.claudePath = cfg.claudePath || 'claude';
+  // 额度查询(`-p /usage`)用的可执行文件, 默认与 claudePath 同一个。
+  // /usage 是 Claude Code 独有的 slash command: 若 claudePath 指向别的引擎(或转发到别的引擎的适配脚本),
+  // 它会把 "/usage" 当普通提问跑一整轮再被 25s 超时杀掉(白烧 token 且永远查不到额度) →
+  // 这时把 quotaClaudePath 单独指向真 claude 可执行文件。
+  cfg.quotaClaudePath = (cfg.quotaClaudePath && String(cfg.quotaClaudePath).trim()) || cfg.claudePath;
   cfg.configPort = cfg.configPort || 8790;   // 本机配置页端口
   // review 超时(ms): 单次 claude 执行超过此时长自动终止并上报失败(交服务端改派), 避免卡死占住队列。
   // 默认 30min; 显式设 0 = 不限时(旧行为)。与 macapp reviewTimeoutMs 对齐。
@@ -300,25 +305,37 @@ function parseUsageText(text) {
   if (m) { out.seven_day_pct = parseInt(m[1], 10); out.seven_day_reset_at = parseUsageReset(m[2]); }
   return (out.five_hour_pct != null || out.seven_day_pct != null) ? out : null;
 }
-// 跑 `claude -p /usage --output-format json` 并解析。成功→更新缓存; 失败/超时→不动(变旧后失效)。
+// 额度查询失败时给出可行动的原因(别笼统甩"解析失败": 排查全靠这一行日志)。
+function usageFailReason(code, killed, text, stderr) {
+  const cut = (s) => String(s).replace(/\s+/g, ' ').trim().slice(0, 160);
+  const notClaude = `(/usage 是 Claude Code 独有能力: 若它不是真 claude —— 例如转发到别的引擎的适配脚本 —— 请把配置里的 quotaClaudePath 指向真 claude)`;
+  if (killed) return `25s 超时被终止, 它可能把 "/usage" 当普通提问在跑 ${notClaude}${stderr ? `; stderr: ${cut(stderr)}` : ''}`;
+  if (code !== 0) return `退出码 ${code} ${notClaude}${stderr ? `; stderr: ${cut(stderr)}` : ''}`;
+  if (!String(text).trim()) return `无输出 ${notClaude}${stderr ? `; stderr: ${cut(stderr)}` : ''}`;
+  return `输出里没有 session/week 百分比 —— claude 未登录 / OAuth token 过期且刷新失败 / 额度接口被限流时,`
+       + ` /usage 只会打印"用量构成"而不带百分比行; 手工跑一次 \`claude -p /usage\` 复现: ${cut(text)}`;
+}
+
+// 跑 `<quotaClaudePath> -p /usage --output-format json` 并解析。成功→更新缓存; 失败/超时→不动(变旧后失效)。
 // 返回 Promise(总 resolve, 不 reject), 供"派活前先查一次"await。
 function pollUsage() {
   return new Promise((resolve) => {
-    let done = false, stdout = '', child, to;
+    let done = false, stdout = '', stderr = '', killed = false, errored = false, child, to;
     const finish = () => { if (done) return; done = true; clearTimeout(to); resolve(); };
     // --dangerously-skip-permissions: 跳过 claude 沙盒/权限初始化, 避免它经 sandboxd 探测 Apple Music/
     // 媒体库等 → 免得给成员弹"访问媒体库"授权(那是 claude 行为被归因到本 app, 与 review 无关)。/usage 只读本地, 无副作用。
-    try { child = spawn(cfg.claudePath, ['-p', '/usage', '--output-format', 'json', '--dangerously-skip-permissions'], { stdio: ['ignore', 'pipe', 'ignore'] }); }
+    try { child = spawn(cfg.quotaClaudePath, ['-p', '/usage', '--output-format', 'json', '--dangerously-skip-permissions'], { stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (e) { logErr(`查额度(/usage)启动失败: ${e.message}`); return resolve(); }
-    to = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} finish(); }, 25000);
-    if (child.stdout) child.stdout.on('data', (d) => { stdout += d; });
-    child.on('error', (e) => { logErr(`查额度(/usage)出错: ${e.message}`); finish(); });
-    child.on('close', () => {
+    to = setTimeout(() => { killed = true; try { child.kill('SIGKILL'); } catch {} finish(); }, 25000);
+    if (child.stdout) child.stdout.on('data', (d) => { if (stdout.length < 65536) stdout += d; });
+    if (child.stderr) child.stderr.on('data', (d) => { if (stderr.length < 4096) stderr += d; });   // 只留头部, 失败时贴进日志
+    child.on('error', (e) => { errored = true; logErr(`查额度(/usage)拉起失败[${cfg.quotaClaudePath}]: ${e.message}`); finish(); });
+    child.on('close', (code) => {
       let text = stdout;
       try { const j = JSON.parse(stdout); if (j && typeof j.result === 'string') text = j.result; } catch { /* 非 json 按纯文本 */ }
       const parsed = parseUsageText(text);
       if (parsed) { usageQuota = parsed; usageQuotaAt = Date.now(); sendQuota(); }   // 刷新后独立上报(不挂心跳)
-      else logErr('查额度(/usage): 未解析出 session/week 百分比(claude 版本过旧?)');
+      else if (!errored) logErr(`查额度(/usage)失败[${cfg.quotaClaudePath}]: ${usageFailReason(code, killed, text, stderr)}`);   // 拉起失败已单独报过
       finish();
     });
   });
@@ -1194,8 +1211,19 @@ function reloadAndReconnect() {
 }
 
 // ---------- 客户端自更新(从 lark-review-client 仓库 git pull + 重启; 失败给手动步骤) ----------
+//
+// 成员是 git clone 装的客户端(见 README/QUICKSTART)。`git pull --ff-only` 在「本地改过的文件正好被这次
+// 更新改到」时会拒绝执行(实测: 无交集时其实能过) —— 而每次发版必动 lark-review-client.js/config-page.html,
+// 所以成员只要改过客户端主文件, 一键更新就是必挂。这里按三条不变量处理本地改动:
+//   I1 更新永远推进: 不因本地改动而失败(最坏是"更新成功但改动没自动恢复")。
+//   I2 改动永不丢失: 先落盘成人类可读的 .patch, 再 git stash —— 双保险。
+//   I3 更新后一定能跑: 绝不把带冲突标记的源码留在工作区(那是 node 语法错误 = 客户端起不来)。
+// 注意与「本地环境差异」区分: 环境相关的东西(claudePath/token/repo 路径…)本来就在 ~/.lark-review-client.json,
+// 不在仓库里, 不受更新影响; 需要改行为时优先加配置项, 而不是改源码。
 const CLIENT_DIR = __dirname;
 const UPDATE_REPO_URL = 'https://github.com/TommyZhao888/lark-review-client';
+const LOCAL_PATCH_DIR = path.join(os.homedir(), '.lark-review-client', 'patches');
+const git = (...args) => run('git', ['-C', CLIENT_DIR, ...args]);
 function manualUpdateSteps() {
   return [
     `cd "${CLIENT_DIR}"`,
@@ -1205,22 +1233,87 @@ function manualUpdateSteps() {
   ];
 }
 async function selfUpdate() {
-  const chk = await run('git', ['-C', CLIENT_DIR, 'rev-parse', '--is-inside-work-tree']);
+  const chk = await git('rev-parse', '--is-inside-work-tree');
   if (chk.code !== 0 || String(chk.stdout).trim() !== 'true') {
     return { ok: false, manual: true, reason: 'not_git', detail: `客户端目录不是 git 仓库(${CLIENT_DIR})，无法自动更新。`, steps: manualUpdateSteps() };
   }
-  const before = (await run('git', ['-C', CLIENT_DIR, 'rev-parse', 'HEAD'])).stdout.trim();
-  const pull = await run('git', ['-C', CLIENT_DIR, 'pull', '--ff-only']);
-  if (pull.code !== 0) {
-    return { ok: false, manual: true, reason: 'pull_failed', detail: (pull.stdout + pull.stderr).trim().slice(-600), steps: manualUpdateSteps() };
+  // 先 fetch 再判断能不能快进 —— 所有"注定失败"的情况都在动工作区之前查出来, 免得白 stash 一场。
+  const fetched = await git('fetch', '--quiet');
+  if (fetched.code !== 0) {
+    return { ok: false, manual: true, reason: 'fetch_failed', detail: (fetched.stdout + fetched.stderr).trim().slice(-600) || '拉取远端失败(网络?)', steps: manualUpdateSteps() };
   }
-  const after = (await run('git', ['-C', CLIENT_DIR, 'rev-parse', 'HEAD'])).stdout.trim();
-  if (before === after) return { ok: true, changed: false, message: '已是最新版本，无需更新。' };
+  const up = await git('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}');
+  const upstream = up.code === 0 ? up.stdout.trim() : '';
+  if (!upstream) {
+    return { ok: false, manual: true, reason: 'no_upstream', detail: '当前分支没有跟踪远端分支, 无法判断该更新到哪个版本。', steps: manualUpdateSteps() };
+  }
+  const before = (await git('rev-parse', 'HEAD')).stdout.trim();
+  const target = (await git('rev-parse', upstream)).stdout.trim();
+  if (before === target) return { ok: true, changed: false, message: '已是最新版本，无需更新。' };
+  // 本地有未推送的提交 → 快进式更新做不到, 且不该悄悄丢掉它们。明说 + 给 rebase 步骤, 工作区一个字节都不动。
+  const ahead = Number((await git('rev-list', '--count', `${upstream}..HEAD`)).stdout.trim()) || 0;
+  if (ahead > 0) {
+    return {
+      ok: false, manual: true, reason: 'diverged',
+      detail: `本地有 ${ahead} 个未推送的提交, 快进式更新会覆盖它们, 已中止(工作区未改动)。`,
+      steps: [`cd "${CLIENT_DIR}"`, 'git pull --rebase        # 把本地提交挪到新版本之上, 有冲突就地解决', 'npm install --omit=dev', './run-client.sh restart'],
+    };
+  }
+  // 工作区脏(不含 .gitignore 忽略的 config.json/日志/node_modules) → 落盘补丁 + stash, 更新完再还回来。
+  const dirty = (await git('status', '--porcelain')).stdout.trim();
+  let local = null;
+  if (dirty) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const st = await git('stash', 'push', '-u', '-m', `lark-review-client auto-update ${stamp}`);
+    if (st.code !== 0) {   // 暂存不了就别硬更新, 否则等于替用户丢改动
+      return { ok: false, manual: true, reason: 'stash_failed', detail: `本地有改动且无法暂存: ${(st.stdout + st.stderr).trim().slice(-400)}`, steps: manualUpdateSteps() };
+    }
+    local = { stashed: true, patch: null };
+    // 落盘一份人类可读的补丁: stash 是 git 内部状态, 成员未必会用; 补丁是他能直接看/直接 apply 的东西。
+    try {
+      fs.mkdirSync(LOCAL_PATCH_DIR, { recursive: true });
+      const pf = path.join(LOCAL_PATCH_DIR, `local-${stamp}.patch`);
+      let p = await git('stash', 'show', '-p', '--include-untracked', 'stash@{0}');
+      if (p.code !== 0) p = await git('stash', 'show', '-p', 'stash@{0}');   // 老 git 不认 --include-untracked
+      fs.writeFileSync(pf, p.stdout);
+      local.patch = pf;
+    } catch (e) { logErr(`self-update: 本地改动补丁写盘失败(${e.message}), 改动仍在 git stash 里`); }
+    log(`self-update: 本地有改动, 已暂存${local.patch ? ` + 落盘 ${local.patch}` : ''}`);
+  }
+  const merged = await git('merge', '--ff-only', target);
+  if (merged.code !== 0) {   // 已 fetch/已确认可快进/工作区已干净, 走到这基本只剩磁盘或钩子问题: 原样还回去
+    if (local) await git('stash', 'pop');
+    return { ok: false, manual: true, reason: 'pull_failed', detail: (merged.stdout + merged.stderr).trim().slice(-600), steps: manualUpdateSteps() };
+  }
+  const after = (await git('rev-parse', 'HEAD')).stdout.trim();
+  let warn = '', restoreSteps = null;
+  if (local) {
+    const pop = await git('stash', 'pop');
+    if (pop.code === 0) { local.restored = 'ok'; log('self-update: 本地改动已恢复'); }
+    else {
+      // I3: 冲突标记留在 lark-review-client.js 里 = 更新完客户端起不来。硬回到干净的新版本。
+      // pop 失败时 git 不会删 stash 条目, 加上落盘的补丁, 改动有两份备份, 这里可以放心 reset。
+      await git('reset', '--hard', after);
+      await git('clean', '-fd');   // 不带 -x: config.json / node_modules / 日志等被忽略的文件不动
+      local.restored = 'conflict';
+      warn = `本地改动与新版本冲突, 未自动恢复(客户端已按干净的新版本运行)。改动没丢: ${local.patch || 'git stash list 里第一条'}`;
+      restoreSteps = [
+        `cd "${CLIENT_DIR}"`,
+        local.patch ? `git apply --3way "${local.patch}"    # 或 git stash pop, 二选一, 然后手工解冲突` : 'git stash pop        # 然后手工解冲突',
+        '# 提示: 与本机环境相关的设置请写进 ~/.lark-review-client.json, 别改源码, 免得每次更新都冲突',
+      ];
+      logErr(`self-update: ${warn}`);
+    }
+  }
   log(`self-update: ${before.slice(0, 7)} → ${after.slice(0, 7)}，npm install + 重启`);
   const npm = await run('npm', ['install', '--omit=dev'], { cwd: CLIENT_DIR });   // 依赖可能变; best-effort
-  notify('🆙 客户端已更新', `${before.slice(0, 7)} → ${after.slice(0, 7)}，正在重启…`);
+  notify('🆙 客户端已更新', `${before.slice(0, 7)} → ${after.slice(0, 7)}${warn ? '(本地改动未自动恢复)' : ''}，正在重启…`);
   setTimeout(doRestart, 800);   // 先把响应回给页面, 再重启
-  return { ok: true, changed: true, before: before.slice(0, 7), after: after.slice(0, 7), npm_ok: npm.code === 0, message: '更新成功，正在重启客户端(几秒后自动重连)…' };
+  return {
+    ok: true, changed: true, before: before.slice(0, 7), after: after.slice(0, 7), npm_ok: npm.code === 0,
+    local, warn: warn || undefined, steps: restoreSteps || undefined,
+    message: '更新成功，正在重启客户端(几秒后自动重连)…',
+  };
 }
 
 function startConfigServer() {

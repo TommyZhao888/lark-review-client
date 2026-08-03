@@ -1,7 +1,7 @@
 import Foundation
 
 /// 客户端版本：升级功能时手动 +1（与 Info.plist 保持一致）。服务端据此判断是否提示升级。
-let CLIENT_VERSION = "1.9.1"
+let CLIENT_VERSION = "1.9.2"
 
 /// 单个 repo 的本机配置（~/.lark-review-client.json 的 repos["owner/repo"]）。
 /// v1.7 起路径均可留空 = 自动模式（clone 到 repoBaseDir/<owner-repo>）。
@@ -33,6 +33,10 @@ struct Config: Equatable {
     var repos: [String: RepoConfig] = [:]
     var reviewModel: String = "claude-opus-4-8"
     var claudePath: String = "claude"
+    /// 额度查询(`-p /usage`)用的可执行文件, 空 = 与 claudePath 同一个。
+    /// /usage 是 Claude Code 独有的 slash command: claudePath 指向别的引擎(或转发到别的引擎的适配脚本)时,
+    /// 它会把 "/usage" 当普通提问跑一整轮再被超时杀掉(白烧 token 且永远查不到额度) → 这里单独指向真 claude。
+    var quotaClaudePath: String = ""
     var heartbeatMs: Int = 15000
     var worktreeMaxAgeDays: Int = 14
     /// 单次 review 的 claude 执行超时(ms): 超时自动终止并按失败上报(交服务端改派), 避免卡死占住队列。
@@ -63,6 +67,12 @@ struct Config: Equatable {
     var quotaSnapshotFreshnessMs: Int = 900000
     /// 自动把额度快照脚本配成 Claude statusLine(仅当未配过 statusLine); false 关闭。
     var autoStatusline: Bool = true
+
+    /// 额度查询实际用的可执行文件(quotaClaudePath 留空 = 复用 claudePath)。
+    var effectiveQuotaClaudePath: String {
+        let p = quotaClaudePath.trimmingCharacters(in: .whitespaces)
+        return p.isEmpty ? claudePath : p
+    }
 
     /// 配置是否完整到可以连接服务端。repos 不是硬性条件：
     /// 项目清单由服务端下发，没配 repo 也允许连接注册（只是不会被派单）。

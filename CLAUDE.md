@@ -24,14 +24,20 @@
 - 每次改动客户端行为 → **bump 版本号 → 提交 → 打 `vX.Y.Z` tag 并 push tag**：
   ```bash
   git commit -am "..."           # 先提交代码
-  git tag -a vX.Y.Z -m "..."     # 语义化版本
+  git tag -a vX.Y.Z -m "..."     # 语义化版本; v 前缀不可省
   git push origin main && git push origin vX.Y.Z
   ```
-- 版本号有**四处，必须同步**（Node 与 macapp 版本保持一致）：
+- **tag 必须带 `v` 前缀**：release.yml 的触发条件是 `tags: ['v*']`。打成 `1.9.1` 这种没 `v` 的 tag,
+  CI **完全不会跑**——没有 Release、没有 dmg、cask 也不 bump,但服务端的 `git ls-remote --tags`
+  照样把它当新版本推给成员 → 成员的 mac app 自更新下载 404。**2026-08-03 的 `1.9.1` 就是这么翻的车**
+  （补救：`gh workflow run release.yml -f tag=<tag>` 只认已存在的 tag，所以要么补打 `v` 版 tag，要么直接发下一个版本）。
+- 版本号有**五处，必须同步**（Node 与 macapp 版本保持一致）：
   - Node：`lark-review-client.js` 顶部 `CLIENT_VERSION` + `package.json` 的 `version`
+    + `package-lock.json` 的**两处** `version`（顶层和 `packages.""`；`npm install` 会自己对齐，
+    但手改 package.json 后不跑 npm 就会漏——v1.8/v1.9 连漏两版停在 1.7.0）
   - macapp：`macapp/Sources/LarkReviewClient/Models/Config.swift` 的 `CLIENT_VERSION`
     + `macapp/Resources/Info.plist` 的 `CFBundleShortVersionString`/`CFBundleVersion`
-- 第 **5** 处是 `Casks/lark-review-client.rb` 的 `version`/`sha256`，但它**由 CI 维护，禁止手工 bump**
+- 最后 **1** 处是 `Casks/lark-review-client.rb` 的 `version`/`sha256`，但它**由 CI 维护，禁止手工 bump**
   （tag push 后 release.yml 的 bump-cask job 自动改并推 main；手改会和 CI 撞。只有改 cask 其余
   stanza 结构时才手动编辑该文件）。
 - 版本步进：改行为/修 bug → patch 或 minor；破坏协议兼容 → 至少 minor，并同步服务端。

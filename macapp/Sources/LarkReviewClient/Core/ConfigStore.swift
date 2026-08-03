@@ -25,6 +25,8 @@ enum ConfigStore {
         cfg.token = (obj["token"] as? String) ?? ""
         if let rm = obj["reviewModel"] as? String, !rm.isEmpty { cfg.reviewModel = rm }
         if let cp = obj["claudePath"] as? String, !cp.isEmpty { cfg.claudePath = cp }
+        if let qcp = obj["quotaClaudePath"] as? String,
+           !qcp.trimmingCharacters(in: .whitespaces).isEmpty { cfg.quotaClaudePath = qcp }
         if let hb = obj["heartbeatMs"] as? Int, hb > 0 { cfg.heartbeatMs = hb }
         if let d = obj["worktreeMaxAgeDays"] as? Int, d > 0 { cfg.worktreeMaxAgeDays = d }
         if let t = obj["reviewTimeoutMs"] as? Int, t >= 0 { cfg.reviewTimeoutMs = t }
@@ -68,6 +70,8 @@ enum ConfigStore {
         cur["token"] = cfg.token.trimmingCharacters(in: .whitespaces)
         let claudePath = cfg.claudePath.trimmingCharacters(in: .whitespaces)
         cur["claudePath"] = claudePath.isEmpty ? "claude" : claudePath
+        let quotaPath = cfg.quotaClaudePath.trimmingCharacters(in: .whitespaces)
+        if quotaPath.isEmpty { cur.removeValue(forKey: "quotaClaudePath") } else { cur["quotaClaudePath"] = quotaPath }
         let model = cfg.reviewModel.trimmingCharacters(in: .whitespaces)
         cur["reviewModel"] = model.isEmpty ? "claude-opus-4-8" : model
         cur["worktreeMaxAgeDays"] = cfg.worktreeMaxAgeDays > 0 ? cfg.worktreeMaxAgeDays : 14

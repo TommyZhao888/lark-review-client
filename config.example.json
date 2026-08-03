@@ -14,7 +14,7 @@
   "_note_prompt": "提示词优先级: 单项目 repos[].prompt > 全局 globalPrompt > 服务端该项目默认 > 内置默认模板。首次安装请按团队约定自行设置(程序不代设)。支持占位符 {{PR_NUM}} {{WORKTREE_PATH}} {{CI_STATUS}} {{PR_URL}} {{REPO}}。",
   "globalPrompt": "",
 
-  "_note_quota": "额度感知【全自动, 无需配置】: 客户端每 10 分钟跑一次 `claude -p /usage`(headless, 零 token, 不碰你的 statusLine)读取 5 小时/7 天额度, 5 小时窗已用 >= 90% 就上报额度不足, 服务端不再派 review 给你、自动换有额度的人; 并把 5 小时用量%+恢复时间上报到 hub 管理页供派活参考。阈值可用 quotaFiveHourThreshold/quotaSevenDayThreshold 覆盖(通常不填)。",
+  "_note_quota": "额度感知【全自动, 无需配置】: 客户端每 10 分钟跑一次 `claude -p /usage`(headless, 零 token, 不碰你的 statusLine)读取 5 小时/7 天额度, 5 小时窗已用 >= 90% 就上报额度不足, 服务端不再派 review 给你、自动换有额度的人; 并把 5 小时用量%+恢复时间上报到 hub 管理页供派活参考。阈值可用 quotaFiveHourThreshold/quotaSevenDayThreshold 覆盖(通常不填)。若把 claudePath 指向了非 Claude Code 的引擎/适配脚本(它不认 /usage), 用 quotaClaudePath 单独指向真 claude, 否则每 10 分钟会白跑一轮再被 25s 超时杀掉。",
 
   "_note_repos": "repos 通常留空 {}。只有想【自定义某项目的本机路径/提示词】才需要加条目, 三个字段全可选: mainRepo 留空 = 自动 clone 到 repoBaseDir/<owner-repo>; worktreeBase 留空 = mainRepo + '-worktrees'; prompt 留空 = 全局/服务端/内置默认。示例条目请按需修改或整段删掉:",
   "repos": {

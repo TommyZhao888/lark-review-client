@@ -310,7 +310,12 @@ async function doSelfUpdate(){
   updBusy=true; btn.disabled=true; msg.textContent='更新中(git pull + 依赖 + 重启)…'; steps.style.display='none';
   try {
     const r = await fetch('/self-update',{method:'POST'}).then(x=>x.json());
-    if (r.ok && r.changed) { msg.textContent = r.message||'更新成功，正在重启…'; pollAfterUpdate(); return; }
+    if (r.ok && r.changed) {
+      msg.textContent = (r.warn ? '⚠️ ' : '') + (r.message||'更新成功，正在重启…');
+      // 本地改动没能自动恢复时, 把告警和找回步骤留在页面上(下面的重启轮询会不断改写 msg, 这里必须另开一块)
+      if (r.warn) { steps.textContent = r.warn + '\n\n找回办法:\n' + (r.steps||[]).join('\n'); steps.style.display='block'; }
+      pollAfterUpdate(); return;
+    }
     if (r.ok && !r.changed) { updBusy=false; btn.disabled=false; msg.textContent = r.message||'已是最新。'; return; }
     // 自动更新失败 → 显示手动步骤
     updBusy=false; btn.disabled=false;

@@ -135,6 +135,7 @@ serverUrl、token，**保存即热重载**(自动按新配置重连)。
 | `globalPrompt` | | 全局 review 提示词（所有项目生效，单项目 `prompt` 优先）。支持占位符 `{{PR_NUM}}` `{{WORKTREE_PATH}}` `{{CI_STATUS}}` `{{PR_URL}}` `{{REPO}}` |
 | `reviewModel` | | claude 模型，默认 `claude-opus-4-8`（必须你账号有权限）|
 | `claudePath` | | claude 可执行路径，默认 `claude` |
+| `quotaClaudePath` | | 查额度（`claude -p /usage`）专用的可执行路径，默认同 `claudePath`。只有把 `claudePath` 指向了**非 Claude Code 的引擎/适配脚本**时才需要填：那种脚本不认 `/usage`，会把它当普通提问跑一整轮再被 25s 超时杀掉（白烧 token 且额度永远查不到），填真 claude 路径即可 |
 | `configPort` | | 本机配置页端口，默认 `8790` |
 | `worktreeMaxAgeDays` | | 超过这个天数没动过的 worktree 自动清理，默认 14 |
 
@@ -206,6 +207,19 @@ ln -sf "$PWD/lionreview.5s.sh" "<SwiftBar 插件目录>/lionreview.5s.sh"
 > npm install --omit=dev
 > ./run-client.sh restart
 > ```
+
+> **改过客户端源码怎么办**：一键更新会先把本地改动 `git stash` 起来、同时落盘一份补丁到
+> `~/.lark-review-client/patches/local-<时间戳>.patch`，更新完再自动还原。**更新不会因为你动过代码而失败。**
+> 万一改动和新版本冲突而还原不了，客户端会停在**干净的新版本**上照常运行（绝不留冲突标记，否则进程起不来），
+> 并在配置页显示告警和找回步骤——改动在补丁和 `git stash list` 里存了两份，不会丢。
+>
+> ```bash
+> cd <客户端目录>
+> git apply --3way ~/.lark-review-client/patches/local-<时间戳>.patch   # 或 git stash pop，二选一
+> ```
+>
+> 更省事的做法：**跟本机环境相关的东西（claude 路径、token、repo 路径…）本来就在 `~/.lark-review-client.json` 里，
+> 不在仓库中、不受更新影响。需要改行为优先提配置项，别改源码。**
 
 ## 安全
 
