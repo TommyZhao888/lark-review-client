@@ -1,8 +1,8 @@
 import Foundation
 
 /// review 任务串行执行（对齐 Node 版 pump/runReviewJob）：一次只跑一单，避免本机多个
-/// claude 抢资源。重复派单的防护在服务端（hub 掉线时保留在途 job + 派单去重），
-/// client 不做去重——只负责重连 + 把真实结果发回。
+/// claude 抢资源。重复派单的防护主要在服务端（hub 掉线时保留在途 job + 派单去重）；
+/// client 只做一件它能确定的事：同一 (repo, PR) 的【待跑】job 只留最新的一个 —— 见 enqueue。
 @MainActor
 final class ReviewCoordinator {
 
@@ -28,7 +28,22 @@ final class ReviewCoordinator {
     private var streamJsonSupported: Bool?
 
     func enqueue(_ job: ReviewJob) {
+        // hub 判一单超时的死线从派单起算, 而本机串行排队期间不发 review_progress —— 队列一深, 还没
+        // 轮到的 job 就会被 hub 判失败并重派, 而老 job 仍躺在队列里 → 同一个 head 被 review 两遍。
+        // (2026-08-07 实测: hub 一次派 6 单, #696 排队 33min 被判失败重派, 队列里同时出现两个 #696。)
+        // 两个 job 都还没开跑, 留新的永远不亏: 重试 = 纯重复; 新一轮 = 老的在评审过期 head。
+        // 已开跑的那单不动(它可能正在评审老 head, 新一轮理应排在它后面)。
+        let stale = queue.filter { $0.repo == job.repo && $0.pr_num == job.pr_num }
+        queue.removeAll { $0.repo == job.repo && $0.pr_num == job.pr_num }
         queue.append(job)
+        for s in stale {
+            LogStore.shared.log("队列去重: PR #\(s.pr_num) 已有新 job \(job.job_id) → 丢弃尚未开跑的旧 job \(s.job_id)")
+            // 立刻回执, 别让 hub 空等到超时(空等正是重派的成因)。exit 0 + 空 verdict = 没跑出 review。
+            let r = ReviewResult(exitCode: 0, logTail: "尚未开跑就被同 PR 的新 job \(job.job_id) 取代"
+                                 + "(hub 重派或新一轮), 本机已丢弃本单; 请以新 job 的结果为准")
+            let msg = OutboundMessage.reviewResult(jobId: s.job_id, result: r)
+            if let payload = try? msg.encodedString() { queueResult(s.job_id, payload) } else { sendMessage(msg) }
+        }
         onQueueChange?(queue)
         pump()
     }
