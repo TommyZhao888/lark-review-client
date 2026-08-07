@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json / package-lock.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.9.2';
+const CLIENT_VERSION = '1.9.3';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -871,8 +871,28 @@ async function runReviewJob(job) {
 let busy = false;
 const queue = [];
 let runningJob = null;                 // 当前执行中的 job(供 /status 菜单栏 + 重连上下文)
-// 注: 重复派单的防护放在服务端(hub 掉线时保留在途 job + 派单去重), client 不做去重 ——
-// client 信息太少易误拦(如合法的"再来一轮")。client 只负责: 重连 + 把真实结果发回。
+// 重复派单的防护主要在服务端(hub 掉线时保留在途 job + 派单去重); client 只做一件它能确定的事:
+// 同一 (repo, PR) 的【待跑】job 只留最新的一个 —— 见 enqueueJob。已开跑的那单不动(它可能正在
+// 评审老 head, 新一轮理应排在它后面), 也不拦"再来一轮"这类合法重派。
+function enqueueJob(job) {
+  // hub 判一单超时的死线从派单起算, 而本机串行排队期间不发 review_progress —— 队列一深, 还没轮到
+  // 的 job 就会被 hub 判失败并重派, 而老 job 仍躺在队列里 → 同一个 head 被 review 两遍。
+  // (2026-08-07 实测: hub 一次派 6 单, #696 排队 33min 被判失败重派, 队列里同时出现两个 #696。)
+  // 两个 job 都还没开跑, 留新的永远不亏: 重试 = 纯重复; 新一轮 = 老的在评审过期 head。
+  const stale = [];
+  for (let i = queue.length - 1; i >= 0; i--) {
+    const q = queue[i];
+    if (q.repo === job.repo && String(q.pr_num) === String(job.pr_num)) stale.unshift(queue.splice(i, 1)[0]);
+  }
+  queue.push(job);
+  for (const s of stale) {
+    logErr(`队列去重: PR #${s.pr_num} 已有新 job ${job.job_id} → 丢弃尚未开跑的旧 job ${s.job_id}`);
+    // 立刻回执, 别让 hub 空等到超时(空等正是重派的成因)。exit 0 + 空 verdict = 没跑出 review。
+    queueResult({ type: 'review_result', job_id: s.job_id, exit_code: 0,
+      log_tail: `尚未开跑就被同 PR 的新 job ${job.job_id} 取代(hub 重派或新一轮), 本机已丢弃本单; 请以新 job 的结果为准`,
+      verdict: '', general_comment_url: '', inline_count: '?', result_line: '' });
+  }
+}
 async function pump() {
   if (busy || !queue.length) return;
   busy = true;
@@ -1072,7 +1092,7 @@ function connect() {
       case 'review_job': {
         log(`got review_job ${msg.job_id} pr=#${msg.pr_num} repo=${msg.repo} branch=${msg.branch}${msg.provider === 'azdo' ? ' provider=azdo' : ''}`);
         notify(`🟡 收到 Review PR #${msg.pr_num}`, `${msg.repo} · ${msg.branch || ''}`);
-        queue.push(msg);
+        enqueueJob(msg);
         pump();
         break;
       }
