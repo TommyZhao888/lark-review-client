@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json / package-lock.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.9.2';
+const CLIENT_VERSION = '1.10.0';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -618,9 +618,21 @@ function renderPrompt(job, worktreePath, ciStatus, repoTmpl) {
 }
 
 // ---------- 异步执行（不阻塞事件循环，保证 review 期间心跳/pong 正常）----------
+// 在跑的子进程集合: hub 下发 cancel(换人取消这单)时要能真把它们杀掉, 否则白烧几分钟额度、
+// 还会以"已经被换掉的人"的身份往 PR 上写评审评论。
+const liveChildren = new Set();
+function killLiveChildren() {
+  for (const c of liveChildren) {
+    try { c.kill('SIGTERM'); } catch { /* 已退出 */ }
+    setTimeout(() => { try { c.kill('SIGKILL'); } catch { /* 已退出 */ } }, 8000).unref();
+  }
+}
 function run(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { ...opts });
+    liveChildren.add(child);
+    const dropChild = () => liveChildren.delete(child);
+    child.on('close', dropChild); child.on('exit', dropChild); child.on('error', dropChild);
     let stdout = '', stderr = '';
     let timedOut = false, killTimer = null, graceTimer = null, drainGraceTimer = null, settled = false;
     const clearTimers = () => {
@@ -871,6 +883,25 @@ async function runReviewJob(job) {
 let busy = false;
 const queue = [];
 let runningJob = null;                 // 当前执行中的 job(供 /status 菜单栏 + 重连上下文)
+let cancelledJobIds = new Set();       // 被 hub 取消的 job_id(结果不再回传: hub 那边已收尾)
+// hub 的 {type:'cancel', job_id} —— 换人生效时调用。在跑的就杀掉, 还在排队的直接丢掉。
+function cancelJob(jobId, reason) {
+  if (!jobId) return;
+  cancelledJobIds.add(jobId);
+  if (cancelledJobIds.size > 200) cancelledJobIds = new Set([...cancelledJobIds].slice(-100));
+  const qBefore = queue.length;
+  for (let i = queue.length - 1; i >= 0; i--) if (queue[i] && queue[i].job_id === jobId) queue.splice(i, 1);
+  const dropped = qBefore - queue.length;
+  if (runningJob && runningJob.job_id === jobId) {
+    log(`收到 hub 取消(${reason || '未说明'}): PR #${runningJob.pr_num} 正在跑, 终止子进程`);
+    notify(`🛑 已取消 Review PR #${runningJob.pr_num}`, reason === 'reviewer_swapped' ? '该 PR 已换人, 本机任务终止' : '任务已被服务端取消');
+    killLiveChildren();
+  } else if (dropped) {
+    log(`收到 hub 取消(${reason || '未说明'}): 已从排队里移除 job ${jobId}`);
+  } else {
+    log(`收到 hub 取消(${reason || '未说明'}): job ${jobId} 不在本机(可能已跑完), 忽略`);
+  }
+}
 // 注: 重复派单的防护放在服务端(hub 掉线时保留在途 job + 派单去重), client 不做去重 ——
 // client 信息太少易误拦(如合法的"再来一轮")。client 只负责: 重连 + 把真实结果发回。
 async function pump() {
@@ -882,6 +913,13 @@ async function pump() {
   let result;
   try { result = await runReviewJob(job); }
   catch (e) { result = { exit_code: 1, log_tail: `客户端异常: ${e.message}`, verdict: '', general_comment_url: '', inline_count: '?', result_line: '' }; }
+  // 被 hub 取消的(换人): 不回传结果 —— hub 那边已经 finishJob 收尾, 再报只会多一条无主结果。
+  if (cancelledJobIds.has(job.job_id)) {
+    cancelledJobIds.delete(job.job_id);
+    log(`PR #${job.pr_num} 已被取消, 不回传结果(exit=${result.exit_code})`);
+    runningJob = null; busy = false; setImmediate(pump);
+    return;
+  }
   // 结果经 pending 队列可靠投递: 断线窗口内完成 / 客户端重启都不丢, 重连后重发直至 hub ack。
   queueResult({ type: 'review_result', job_id: job.job_id, ...result });
   const uNote = result.usage && result.usage.output_tokens != null
@@ -998,6 +1036,10 @@ function connect() {
   ws.on('message', (data) => {
     let msg; try { msg = JSON.parse(data.toString()); } catch { return; }
     switch (msg.type) {
+      case 'cancel': {
+        cancelJob(msg.job_id, msg.reason);
+        break;
+      }
       case 'register_ack': {
         registered = true;
         halted = false;
