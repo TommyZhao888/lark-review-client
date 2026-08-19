@@ -4,8 +4,8 @@
 # version / sha256 由 CI 在每次发版后自动 bump（.github/workflows/release.yml 的 bump-cask job），
 # 请勿手工改这两行；其余 stanza 才是人工维护的。
 cask "lark-review-client" do
-  version "1.10.0"
-  sha256 "d0eb776c3b556e9d6d52e4d24add279bbd4a31bc1d88bea5e46c07f091c06595"
+  version "1.10.1"
+  sha256 "7700e00e898e6069a3474efd0ffddbf4175f76545e7c0bb5b0b428330fc06d7e"
 
   url "https://github.com/TommyZhao888/lark-review-client/releases/download/v#{version}/LarkReviewClient-v#{version}.dmg"
   name "LarkReviewClient"
