@@ -1,5 +1,18 @@
 # 更新说明
 
+## v1.10.1 — 2026-08-19
+
+> 补 v1.10.0 的发版事故: 那个 tag 的 DMG 里 app 版本仍是 1.9.2, 自更新会被 app 自己的版本校验
+> 拦下(「安装包版本(1.9.2)与期望(1.10.0)不符」)。v1.10.0 的 release 已删除, 请升到本版。
+
+- **功能同 v1.10.0**: 支持 hub 下发 `cancel` —— 服务端换人生效时会叫停你机器上正在跑的那单
+  review(SIGTERM,8 秒后 SIGKILL),排队中的直接出队,已跑完的忽略。被取消的任务不回传结果
+  (hub 那边已收尾)。省额度,也避免"已经被换掉的人"还往 PR 上写评审评论。
+- **修根因**: 版本号散在 5 处(`lark-review-client.js`、`package.json`、`macapp/Resources/Info.plist`
+  的 `CFBundleShortVersionString`+`CFBundleVersion`、`macapp/.../Config.swift`),v1.10.0 只改了前两处。
+  现在 `.github/workflows/release.yml` 加了**发版门禁**: tag 与这 5 处任一不一致就直接 fail,
+  坏包再也发不出去。
+
 ## v1.9.2 — 2026-08-03
 
 > 两件事:①「一键更新」不再被本地改动卡死(Node 版);②修复「查额度(/usage)」永远失败——日志把原因

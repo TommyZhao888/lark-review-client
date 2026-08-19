@@ -41,6 +41,28 @@ jobs:
         with:
           ref: ${{ steps.tag.outputs.name }}   # 检出该 tag 对应代码
 
+      # 版本号一致性门禁: tag 必须与【全部 5 处】版本号一致才继续。
+      # 血泪来源 v1.10.0: 只 bump 了 JS + package.json, 忘了 macapp 的 Info.plist(×2) 和
+      # Config.swift → CI 照样出包发布, 成员自更新时被 app 自己的 verifyStagedPlist 拦下
+      # ("安装包版本(1.9.2)与期望(1.10.0)不符"), 等于发了个装不上的版本。
+      # 宁可在这里 fail, 不要让坏包发出去。
+      - name: 校验版本号一致(tag == JS == package.json == Info.plist == Config.swift)
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.name }}"; V="${TAG#v}"
+          js=$(sed -nE "s/^const CLIENT_VERSION = '([^']+)';/\1/p" lark-review-client.js | head -1)
+          pkg=$(sed -nE 's/.*"version": "([^"]+)".*/\1/p' package.json | head -1)
+          swiftv=$(sed -nE 's/^let CLIENT_VERSION = "([^"]+)".*/\1/p' macapp/Sources/LarkReviewClient/Models/Config.swift | head -1)
+          short=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' macapp/Resources/Info.plist)
+          bundlev=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' macapp/Resources/Info.plist)
+          echo "tag=$V js=$js package.json=$pkg Config.swift=$swiftv Info.plist(short)=$short Info.plist(bundle)=$bundlev"
+          fail=0
+          for pair in "js:$js" "package.json:$pkg" "Config.swift:$swiftv" "Info.plist/CFBundleShortVersionString:$short" "Info.plist/CFBundleVersion:$bundlev"; do
+            name="${pair%%:*}"; val="${pair#*:}"
+            if [ "$val" != "$V" ]; then echo "::error::$name = $val, 与 tag($V) 不一致"; fail=1; fi
+          done
+          [ "$fail" = 0 ] || { echo "版本号没对齐, 中止发版(改完 5 处再重新打 tag)"; exit 1; }
+
       # 用 make bundle(自古就有) + 内联 hdiutil, 不依赖 make dmg 目标 ——
       # 这样连早于"dmg 目标"的旧 tag(如 v1.4.0)也能出包, 无需移动 tag。
       - name: 编译 + 打 DMG
