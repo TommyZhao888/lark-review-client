@@ -80,13 +80,18 @@ final class AppRuntime {
 
         // Claude 额度查询: 立即一次 + 每 10min(headless `claude -p /usage`, 零 token; 派活前还会再查一次)。
         // 刷新出新鲜额度就独立上报一次 .quota(不再挂心跳; 与 Node 版一致)。
-        usageTask = Task { @MainActor [state, ws] in
+        usageTask = Task { @MainActor [state] in
             while !Task.isCancelled {
                 let ok = await QuotaMonitor.shared.refreshUsage(config: state.config)
-                if ok { ws.send(.quota(quota: QuotaMonitor.shared.current(config: state.config), wsReconnects24h: ws.reconnects24h)) }
+                if ok { AppRuntime.shared.reportQuota() }
                 try? await Task.sleep(for: .seconds(600))
             }
         }
+    }
+
+    /// 额度独立上报(与心跳解耦; 对齐 Node 版 sendQuota): /usage 刷出新鲜额度后 + 设置页「立即查一次」后。
+    func reportQuota() {
+        ws.send(.quota(quota: QuotaMonitor.shared.current(config: state.config), wsReconnects24h: ws.reconnects24h))
     }
 
     func shutdown() {
@@ -279,7 +284,9 @@ final class AppRuntime {
         reviews.onJobFinish = { [state, notifications] job, result in
             state.runningJob = nil
             state.cancelling = false
-            if result.exitCode == 0, !result.verdict.isEmpty {
+            if let dup = result.dedupedOf {
+                notifications.notify("⏭ 跳过重复 Review PR #\(job.pr_num)", "同 head 已由 job \(dup) 评审并提交, 本机未重复跑")
+            } else if result.exitCode == 0, !result.verdict.isEmpty {
                 var uNote = ""
                 if let u = result.usage, let outTok = u.outputTokens {
                     uNote = " · \(u.inputTokens ?? 0)/\(outTok) tokens $\(u.totalCostUsd ?? 0)"
