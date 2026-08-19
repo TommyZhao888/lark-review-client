@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 设置窗口：连接 / 本机环境 / 项目 三个 tab。
+/// 设置窗口：连接 / 本机环境 / 项目 / 额度 四个 tab。
 /// 编辑的是草稿副本，「保存并应用」时校验 → 落盘 → 热重载重连。
 struct SettingsView: View {
     @Environment(AppState.self) private var state
@@ -19,6 +19,8 @@ struct SettingsView: View {
                     .tabItem { Label("本机环境", systemImage: "gearshape") }
                 ReposTab(draft: $draft)
                     .tabItem { Label("项目", systemImage: "folder") }
+                QuotaTab()
+                    .tabItem { Label("额度", systemImage: "gauge.with.needle") }
             }
             footer
         }

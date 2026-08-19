@@ -71,7 +71,8 @@ final class LogStore: @unchecked Sendable {
     // ---------- review 日志 ----------
 
     /// 把一次 review 的完整输出写入本机日志文件，返回路径（格式对齐 Node writeReviewLog）。
-    func writeReviewLog(job: ReviewJob, model: String, exitCode: Int32, result: ReviewResult, logText: String) -> String? {
+    func writeReviewLog(job: ReviewJob, model: String, exitCode: Int32, result: ReviewResult, logText: String,
+                        head: String = "") -> String? {
         let stamp = isoNow().replacingOccurrences(of: ":", with: "-").replacingOccurrences(of: ".", with: "-")
         let file = reviewLogDir + "/pr-\(job.pr_num)-\(stamp).log"
         var uLine = ""
@@ -84,7 +85,8 @@ final class LogStore: @unchecked Sendable {
         }
         let verdict = result.verdict.isEmpty ? "-" : result.verdict
         let gcu = result.generalCommentUrl.isEmpty ? "-" : result.generalCommentUrl
-        var header = "# PR #\(job.pr_num)  repo=\(job.repo)  branch=\(job.branch ?? "")\n"
+        let headShort = head.isEmpty ? "-" : String(head.prefix(8))
+        var header = "# PR #\(job.pr_num)  repo=\(job.repo)  branch=\(job.branch ?? "")  head=\(headShort)\n"
         header += "# job=\(job.job_id)  model=\(model)  time=\(isoNow())\n"
         header += "# exit=\(exitCode)  verdict=\(verdict)  inline=\(result.inlineCount)  general_comment=\(gcu)\n"
         header += uLine

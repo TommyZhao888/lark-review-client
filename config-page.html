@@ -43,6 +43,10 @@
   .tab.active { color:var(--fg); border-bottom-color:var(--acc); }
   .hide { display:none; }
   .logbox { background:#0b0d11; border:1px solid var(--line); border-radius:8px; padding:12px; max-height:62vh; overflow:auto; white-space:pre-wrap; word-break:break-all; font:12px/1.5 ui-monospace,Menlo,monospace; color:#c8cdd6; margin:0; }
+  .bar { height:8px; background:#0b0d11; border:1px solid var(--line); border-radius:6px; overflow:hidden; margin:6px 0 4px; }
+  .bar > i { display:block; height:100%; background:var(--ok); }
+  .bar.warn > i { background:#ffb454; } .bar.err > i { background:var(--err); }
+  .wrow { margin:0 0 14px; }
 </style>
 </head>
 <body>
@@ -54,6 +58,7 @@
 <div class="tabs">
   <button id="tab-btn-config" class="tab active" onclick="showTab('config')">配置</button>
   <button id="tab-btn-logs" class="tab" onclick="showTab('logs')">日志</button>
+  <button id="tab-btn-quota" class="tab" onclick="showTab('quota')">额度</button>
 </div>
 <main>
  <div id="tab-config">
@@ -151,6 +156,46 @@
     </div>
     <div class="muted" style="margin-bottom:8px">运行日志=派单/claude 退出码/连接事件; 选某次 review 可看该次 claude 的完整输出(存于本机 ~/.lark-review-client-logs)。</div>
     <pre id="logbox" class="logbox">加载中…</pre>
+  </div>
+ </div>
+
+ <div id="tab-quota" class="hide">
+  <div class="card">
+    <h2>账号套餐(读本机 claude 登录态)</h2>
+    <div class="idrow">
+      <div><span>套餐</span><b id="qPlan">—</b></div>
+      <div><span>登录方式</span><b id="qAuth">—</b></div>
+      <div><span>账号</span><b id="qEmail">—</b></div>
+      <div><span>组织</span><b id="qOrg">—</b></div>
+    </div>
+    <div id="qPlanErr" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>额度用量 <span class="muted" id="qAt"></span></h2>
+    <div id="qWindows"><span class="muted">加载中…</span></div>
+    <div id="qState"></div>
+    <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <button class="sm" id="qBtn" onclick="refreshQuota()">↻ 立即查一次</button>
+      <span class="muted" id="qMsg"></span>
+    </div>
+    <div class="muted" id="qNote" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <h2>模型</h2>
+    <div class="idrow">
+      <div><span>review 模型(本机配置)</span><b class="mono" id="qModel">—</b></div>
+      <div><span>最近一次 review 实际模型</span><b class="mono" id="qLastModel">—</b></div>
+      <div><span>claude 版本</span><b class="mono" id="qVer">—</b></div>
+    </div>
+    <div class="muted" id="qPaths" style="margin-top:8px"></div>
+    <div class="muted" style="margin-top:4px">服务端派单时可用 <code>review_model</code> 覆盖本机配置, 故两者可能不同。</div>
+  </div>
+
+  <div class="card">
+    <h2>/usage 原文(排查用)</h2>
+    <pre id="qRaw" class="logbox" style="max-height:32vh">—</pre>
   </div>
  </div>
 </main>
@@ -378,13 +423,15 @@ async function save(){
   } catch(e){ $('msg').innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
 }
 // ---- tab 切换 ----
+const TABS = ['config', 'logs', 'quota'];
 let logTimer=null;
 function showTab(t){
-  $('tab-config').classList.toggle('hide', t!=='config');
-  $('tab-logs').classList.toggle('hide', t!=='logs');
-  $('tab-btn-config').classList.toggle('active', t==='config');
-  $('tab-btn-logs').classList.toggle('active', t==='logs');
+  TABS.forEach(x=>{
+    $('tab-'+x).classList.toggle('hide', x!==t);
+    $('tab-btn-'+x).classList.toggle('active', x===t);
+  });
   if(t==='logs'){ loadReviewLogList(); loadLogs(); startLogAuto(); } else { stopLogAuto(); }
+  if(t==='quota'){ loadQuota(); startQuotaAuto(); } else { stopQuotaAuto(); }
 }
 async function loadReviewLogList(){
   try {
@@ -412,6 +459,81 @@ async function loadLogs(){
 }
 function startLogAuto(){ stopLogAuto(); if($('logauto') && $('logauto').checked) logTimer=setInterval(loadLogs, 3000); }
 function stopLogAuto(){ if(logTimer){ clearInterval(logTimer); logTimer=null; } }
+
+// ---- 额度 tab: 账号套餐 / 5 小时窗 / 周窗 / 重置时间 / 模型 ----
+let quotaTimer=null, quotaBusy=false;
+function fmtTime(ms){ return ms ? new Date(ms).toLocaleString('zh-CN',{hour12:false}) : '—'; }
+function fmtDelta(ms){
+  if(!ms) return '';
+  const d = ms - Date.now();
+  if(d <= 0) return '(已到点)';
+  const h = Math.floor(d/3600000), m = Math.round((d%3600000)/60000);
+  if(h >= 48) return '(还有 '+Math.floor(h/24)+'d'+(h%24)+'h)';
+  return '(还有 '+(h?h+'h':'')+m+'m)';
+}
+// 一个额度窗: 进度条 + 已用% + 阈值 + 重置时间。pct 为空 = 还没查到(显示 —)。
+function quotaWindowRow(label, w, threshold){
+  const pct = (w && w.pct != null) ? w.pct : null;
+  const cls = pct==null ? '' : (pct >= threshold ? ' err' : pct >= threshold - 15 ? ' warn' : '');
+  return `<div class="wrow">
+    <div style="display:flex; justify-content:space-between; gap:10px; align-items:baseline">
+      <b>${esc(label)}</b>
+      <span>${pct==null?'<span class="muted">—</span>':('<b>'+pct+'%</b> 已用')} <span class="muted">/ 停派阈值 ${threshold}%</span></span>
+    </div>
+    <div class="bar${cls}"><i style="width:${pct==null?0:Math.min(100,pct)}%"></i></div>
+    <div class="muted">${(w&&w.reset_at) ? '重置 '+esc(fmtTime(w.reset_at))+' '+esc(fmtDelta(w.reset_at)) : '(该窗未给出重置时间)'}</div>
+  </div>`;
+}
+function renderQuota(q){
+  const p = q.plan || {};
+  $('qPlan').textContent = p.subscription_type ? String(p.subscription_type).toUpperCase() : '—';
+  $('qAuth').textContent = p.auth_method || '—';
+  $('qEmail').textContent = p.email || '—';
+  $('qOrg').textContent = p.org_name || '—';
+  $('qPlanErr').innerHTML = (p.logged_in === false)
+    ? '<span class="err">claude 未登录 —— 终端跑 <code>claude auth login</code>, 否则额度查不到、review 也跑不了。</span>'
+    : (q.plan_error ? '<span class="muted">'+esc(q.plan_error)+'</span>' : '');
+  const th = q.thresholds || {};
+  const t5 = Number(th.five_hour || 90), t7 = Number(th.seven_day || 95);
+  let html = quotaWindowRow('5 小时窗(current session)', q.five_hour, t5)
+           + quotaWindowRow('周窗(7 天, 全部模型)', q.seven_day, t7);
+  (q.model_windows || []).forEach(m => { html += quotaWindowRow('周窗 · '+m.name, m, t7); });
+  $('qWindows').innerHTML = html;
+  const stale = q.updated_at && !q.fresh;
+  $('qAt').textContent = q.updated_at
+    ? ('· 数据时间 '+fmtTime(q.updated_at)+(stale?' (已过期, 上报服务端时按未知处理)':''))
+    : '· 尚未查到';
+  $('qState').innerHTML = q.ok
+    ? '<span class="ok">✓ 额度充足, 可正常接单</span>'
+    : '<span class="err">⛔ 额度不足('+esc(q.reason||'')+') · 已停止接单, 预计 '+esc(fmtTime(q.reset_at))+' '+esc(fmtDelta(q.reset_at))+' 恢复</span>';
+  if (q.last_error) {
+    $('qState').innerHTML += '<div class="muted" style="margin-top:8px">最近一次查额度失败('+esc(fmtTime(q.last_error.at))+'): '+esc(q.last_error.reason)+'</div>';
+  }
+  $('qNote').textContent = '客户端每 '+Math.round(Number(q.poll_ms||600000)/60000)+' 分钟用 `claude -p /usage` 自动查一次(headless, 零 token), 派单前还会再查一次; '
+    + '任一窗超过阈值即上报额度不足, 服务端改派他人, 到重置时间自动恢复。';
+  $('qModel').textContent = q.review_model || '—';
+  const lr = q.last_review;
+  $('qLastModel').textContent = lr
+    ? (lr.model + (lr.ts ? ' · '+new Date(lr.ts).toLocaleString('zh-CN',{hour12:false}) : '') + (lr.repo ? ' · '+lr.repo+' #'+lr.pr_num : ''))
+    : '—';
+  $('qVer').textContent = (q.claude && q.claude.version) || '—';
+  const c = q.claude || {};
+  $('qPaths').textContent = 'claude: '+(c.path||'claude')+(c.quota_path && c.quota_path !== c.path ? ' · 查额度用: '+c.quota_path : '');
+  $('qRaw').textContent = q.raw || '(暂无 —— 还没成功查到过额度)';
+}
+async function loadQuota(){
+  try { renderQuota(await fetch('/quota').then(r=>r.json())); }
+  catch(e){ $('qMsg').textContent = '读取失败: '+e.message; }
+}
+async function refreshQuota(){
+  if (quotaBusy) return;
+  quotaBusy = true; $('qBtn').disabled = true; $('qMsg').textContent = '查询中(claude -p /usage)…';
+  try { renderQuota(await fetch('/quota/refresh',{method:'POST'}).then(r=>r.json())); $('qMsg').textContent = ''; }
+  catch(e){ $('qMsg').textContent = '查询失败: '+e.message; }
+  finally { quotaBusy = false; $('qBtn').disabled = false; }
+}
+function startQuotaAuto(){ stopQuotaAuto(); quotaTimer = setInterval(loadQuota, 15000); }
+function stopQuotaAuto(){ if(quotaTimer){ clearInterval(quotaTimer); quotaTimer=null; } }
 
 // ---- 重启服务 ----
 async function doRestart(){

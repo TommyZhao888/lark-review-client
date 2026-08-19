@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json / package-lock.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.10.1';
+const CLIENT_VERSION = '1.10.2';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -273,11 +273,23 @@ function parseResetToEpoch(text, kind) {
 
 // ---- 用 `claude -p /usage` 查额度(headless 可用, 零 token 消耗 ~1s, 自带重置时间)----
 // 比 statusline 快照稳: 不依赖交互、不碰用户的 statusLine、纯跑 review 的机器也能查。
-let usageQuota = null;            // { five_hour_pct, five_hour_reset_at, seven_day_pct, seven_day_reset_at }
+let usageQuota = null;            // { five_hour_pct, five_hour_reset_at, seven_day_pct, seven_day_reset_at, model_windows }
 let usageQuotaAt = 0;            // 上次成功查询时刻(ms)
+let usageRawText = '';           // 最近一次 /usage 原文(仅设置页「额度」tab 展示/排查用, 不上报)
+let usageLastError = null;       // 最近一次查额度失败 { at, reason }(成功即清空); 设置页据此解释"为何没有百分比"
 const USAGE_POLL_MS = 600000;    // 每 10 分钟查一次(派活前还会再查一次拿最新值)
 const USAGE_FRESH_MS = 1500000;  // 结果 25 分钟内视为新鲜(必须 > 轮询间隔, 且能容忍一次失败轮询), 否则值会在
                                  // 两次刷新之间被判过期 → hub 闪断显示 —。宁可短时展示稍旧值也一直显示到下次刷新。
+// 探针默认带 --no-session-persistence: 不加的话 claude 会把每次 /usage 存成一条会话记录
+// (实测 claude 2.1.235: 每次 ~55KB, 每 10 分钟一条 → 一天 ~8MB, 还会把成员的 `claude --resume`
+// 列表刷满一堆零轮次的 /usage 会话)。老版 claude 没这个开关 → 首次报 unknown option 就记下并
+// 去掉重试, 之后不再带(见 pollUsage)。
+let usageNoPersist = true;
+function usageArgs() {
+  const a = ['-p', '/usage', '--output-format', 'json', '--dangerously-skip-permissions'];
+  if (usageNoPersist) a.push('--no-session-persistence');
+  return a;
+}
 
 // 把 /usage 的 "Jul 10 at 3pm" 这类文案(本机时区, 与 /usage 显示时区一致)解析成 epoch ms。
 function parseUsageReset(s) {
@@ -296,6 +308,7 @@ function parseUsageReset(s) {
   return d.getTime();
 }
 // 解析 /usage 文本: "Current session: N% used · resets ..."(=5 小时窗)/ "Current week (all models): M% used · resets ..."。
+// 另收「按模型」的周窗行(如 "Current week (Opus): 12% used"): 仅供设置页展示, 不参与派活判定, 也不上报服务端。
 function parseUsageText(text) {
   if (!text) return null;
   const out = {};
@@ -303,6 +316,15 @@ function parseUsageText(text) {
   if (m) { out.five_hour_pct = parseInt(m[1], 10); out.five_hour_reset_at = parseUsageReset(m[2]); }
   m = text.match(/Current week \(all models\):\s*(\d+)%\s*used(?:[^\n]*?\bresets\s*([^\n(]+))?/i);
   if (m) { out.seven_day_pct = parseInt(m[1], 10); out.seven_day_reset_at = parseUsageReset(m[2]); }
+  const models = [];
+  const re = /Current week \(([^)\n]+)\):\s*(\d+)%\s*used(?:[^\n]*?\bresets\s*([^\n(]+))?/gi;
+  let g;
+  while ((g = re.exec(text)) !== null) {
+    const name = g[1].trim();
+    if (/^all models$/i.test(name)) continue;   // 总量那行已单独解析
+    models.push({ name, pct: parseInt(g[2], 10), reset_at: parseUsageReset(g[3]) });
+  }
+  out.model_windows = models;
   return (out.five_hour_pct != null || out.seven_day_pct != null) ? out : null;
 }
 // 额度查询失败时给出可行动的原因(别笼统甩"解析失败": 排查全靠这一行日志)。
@@ -318,24 +340,43 @@ function usageFailReason(code, killed, text, stderr) {
 
 // 跑 `<quotaClaudePath> -p /usage --output-format json` 并解析。成功→更新缓存; 失败/超时→不动(变旧后失效)。
 // 返回 Promise(总 resolve, 不 reject), 供"派活前先查一次"await。
-function pollUsage() {
+function pollUsage(isRetry = false) {
   return new Promise((resolve) => {
     let done = false, stdout = '', stderr = '', killed = false, errored = false, child, to;
     const finish = () => { if (done) return; done = true; clearTimeout(to); resolve(); };
     // --dangerously-skip-permissions: 跳过 claude 沙盒/权限初始化, 避免它经 sandboxd 探测 Apple Music/
     // 媒体库等 → 免得给成员弹"访问媒体库"授权(那是 claude 行为被归因到本 app, 与 review 无关)。/usage 只读本地, 无副作用。
-    try { child = spawn(cfg.quotaClaudePath, ['-p', '/usage', '--output-format', 'json', '--dangerously-skip-permissions'], { stdio: ['ignore', 'pipe', 'pipe'] }); }
+    try { child = spawn(cfg.quotaClaudePath, usageArgs(), { stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch (e) { logErr(`查额度(/usage)启动失败: ${e.message}`); return resolve(); }
     to = setTimeout(() => { killed = true; try { child.kill('SIGKILL'); } catch {} finish(); }, 25000);
     if (child.stdout) child.stdout.on('data', (d) => { if (stdout.length < 65536) stdout += d; });
     if (child.stderr) child.stderr.on('data', (d) => { if (stderr.length < 4096) stderr += d; });   // 只留头部, 失败时贴进日志
-    child.on('error', (e) => { errored = true; logErr(`查额度(/usage)拉起失败[${cfg.quotaClaudePath}]: ${e.message}`); finish(); });
+    child.on('error', (e) => {
+      errored = true;
+      usageLastError = { at: Date.now(), reason: `拉起失败: ${e.message}` };
+      logErr(`查额度(/usage)拉起失败[${cfg.quotaClaudePath}]: ${e.message}`);
+      finish();
+    });
     child.on('close', (code) => {
       let text = stdout;
       try { const j = JSON.parse(stdout); if (j && typeof j.result === 'string') text = j.result; } catch { /* 非 json 按纯文本 */ }
       const parsed = parseUsageText(text);
-      if (parsed) { usageQuota = parsed; usageQuotaAt = Date.now(); sendQuota(); }   // 刷新后独立上报(不挂心跳)
-      else if (!errored) logErr(`查额度(/usage)失败[${cfg.quotaClaudePath}]: ${usageFailReason(code, killed, text, stderr)}`);   // 拉起失败已单独报过
+      if (parsed) {
+        usageQuota = parsed; usageQuotaAt = Date.now();
+        usageRawText = String(text).trim(); usageLastError = null;
+        sendQuota();   // 刷新后独立上报(不挂心跳)
+      } else if (!errored) {
+        const reason = usageFailReason(code, killed, text, stderr);   // 拉起失败已单独报过
+        // 老版 claude 不认 --no-session-persistence → 去掉重试一次(只试一次: 重试时 usageNoPersist 已为 false)。
+        if (!isRetry && usageNoPersist && /unknown (option|flag)/i.test(stderr + text)) {
+          usageNoPersist = false;
+          logErr('查额度(/usage): 本机 claude 不认 --no-session-persistence, 去掉该开关重试(此后每次查额度会在 ~/.claude 留一条会话记录)');
+          pollUsage(true).then(finish);
+          return;
+        }
+        usageLastError = { at: Date.now(), reason };
+        logErr(`查额度(/usage)失败[${cfg.quotaClaudePath}]: ${reason}`);
+      }
       finish();
     });
   });
@@ -361,6 +402,72 @@ function currentQuota() {
     if (d7 != null && d7 >= cfg.quotaSevenDayThreshold) return { ok: false, reason: `seven_day_${d7}pct`, reset_at: d7r, ...base };
   }
   return { ok: true, reason: null, reset_at: null, ...base };
+}
+
+// ---- 设置页「额度」tab 的补充信息: 账号套餐 / claude 版本 / 模型(按需查 + 5min 缓存) ----
+// 只在有人打开设置页时才 spawn(至多每 5min 一次), 不进心跳/派活链路, 不影响 review。
+let claudeAccount = null;
+let claudeAccountAt = 0;
+const CLAUDE_ACCOUNT_TTL_MS = 300000;
+async function claudeAccountInfo(force = false) {
+  if (!force && claudeAccount && Date.now() - claudeAccountAt < CLAUDE_ACCOUNT_TTL_MS) return claudeAccount;
+  const bin = cfg.quotaClaudePath;
+  const o = { stdio: ['ignore', 'pipe', 'pipe'], timeoutMs: 15000 };
+  const [st, ver] = await Promise.all([run(bin, ['auth', 'status'], o), run(bin, ['--version'], o)]);
+  let plan = null;
+  try {
+    const j = JSON.parse(st.stdout);
+    if (j && typeof j === 'object') {
+      plan = { logged_in: !!j.loggedIn, auth_method: j.authMethod || null, subscription_type: j.subscriptionType || null,
+               email: j.email || null, org_name: j.orgName || null };
+    }
+  } catch { /* 老版 claude / 不是真 claude: 输出不是 JSON */ }
+  claudeAccount = {
+    plan,
+    plan_error: plan ? null : `\`${bin} auth status\` 没给出 JSON(退出码 ${st.code}) —— claude 版本过旧, 或它不是真 claude`,
+    version: ver.code === 0 ? String(ver.stdout).trim().split('\n')[0] : null,
+  };
+  claudeAccountAt = Date.now();
+  return claudeAccount;
+}
+
+// 最近一次 review 实际用的模型(服务端派单可用 review_model 覆盖本机配置 → 两者可能不同)。
+function lastReviewInfo() {
+  let lines;
+  try { lines = fs.readFileSync(USAGE_LOG_FILE, 'utf8').trim().split('\n'); } catch { return null; }   // 还没跑过 review
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].trim()) continue;
+    try {
+      const r = JSON.parse(lines[i]);
+      if (r && r.model) return { model: r.model, ts: r.ts || null, repo: r.repo || '', pr_num: r.pr_num || '' };
+    } catch { /* 坏行跳过 */ }
+  }
+  return null;
+}
+
+// 设置页「额度」tab 的完整数据。force = 先现查一次 /usage 再取(页面「立即查一次」按钮)。
+// 百分比取缓存原值(过期也照给, 由 fresh/updated_at 让页面标注), ok/reason 则与上报服务端的判定完全一致。
+async function quotaSnapshot(force = false) {
+  if (force) await pollUsage();
+  const acct = await claudeAccountInfo(force);
+  const q = currentQuota();
+  const u = usageQuota || {};
+  return {
+    ok: q.ok, reason: q.reason, reset_at: q.reset_at,
+    five_hour: { pct: u.five_hour_pct ?? null, reset_at: u.five_hour_reset_at ?? null },
+    seven_day: { pct: u.seven_day_pct ?? null, reset_at: u.seven_day_reset_at ?? null },
+    model_windows: u.model_windows || [],
+    thresholds: { five_hour: cfg.quotaFiveHourThreshold, seven_day: cfg.quotaSevenDayThreshold },
+    updated_at: usageQuotaAt || null,
+    fresh: !!usageQuotaAt && Date.now() - usageQuotaAt < USAGE_FRESH_MS,
+    poll_ms: USAGE_POLL_MS, fresh_ms: USAGE_FRESH_MS,
+    last_error: usageLastError,
+    plan: acct.plan, plan_error: acct.plan_error,
+    claude: { version: acct.version, path: cfg.claudePath, quota_path: cfg.quotaClaudePath },
+    review_model: cfg.reviewModel,
+    last_review: lastReviewInfo(),
+    raw: usageRawText,
+  };
 }
 
 // 24h 内 ws 重连次数(网络稳定性弱信号, 随 register/quota 上报, 供服务端评分选人降权)。
@@ -416,7 +523,7 @@ const REVIEW_LOG_DIR = process.env.LARK_REVIEW_CLIENT_REVIEW_LOG_DIR || path.joi
 try { fs.mkdirSync(REVIEW_LOG_DIR, { recursive: true }); } catch { /* ignore */ }
 
 // 把一次 review 的完整输出(claude stdout+stderr)写入本机日志文件, 返回路径。
-function writeReviewLog(job, code, parsed, logText, usage) {
+function writeReviewLog(job, code, parsed, logText, usage, head) {
   try {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const file = path.join(REVIEW_LOG_DIR, `pr-${job.pr_num}-${ts}.log`);
@@ -424,7 +531,7 @@ function writeReviewLog(job, code, parsed, logText, usage) {
       ? `# tokens: in=${usage.input_tokens ?? '?'} out=${usage.output_tokens ?? '?'} cache_read=${usage.cache_read_input_tokens ?? '?'} cache_write=${usage.cache_creation_input_tokens ?? '?'}  cost=$${usage.total_cost_usd ?? '?'}  turns=${usage.num_turns ?? '?'}\n`
       : '';
     const header =
-      `# PR #${job.pr_num}  repo=${job.repo}  branch=${job.branch}\n` +
+      `# PR #${job.pr_num}  repo=${job.repo}  branch=${job.branch}  head=${(head || '').slice(0, 8) || '-'}\n` +
       `# job=${job.job_id}  model=${job.review_model || cfg.reviewModel}  time=${new Date().toISOString()}\n` +
       `# exit=${code}  verdict=${parsed.verdict || '-'}  inline=${parsed.inline_count}  general_comment=${parsed.general_comment_url || '-'}\n` +
       uLine +
@@ -725,7 +832,13 @@ async function ensureWorktree(mainRepo, worktreeBase, prNum, branch, provider) {
       }
     }
   }
-  return { worktreePath, ok: r.code === 0, detail: (r.stdout || '') + (r.stderr || '') };
+  // 本次评审的 head(worktree 已 reset 到该 PR 分支最新提交): 用于同 head 重复派单去重 + 日志头标注。
+  let head = '';
+  if (r.code === 0) {
+    const h = await run('git', ['-C', worktreePath, 'rev-parse', 'HEAD'], { env });
+    if (h.code === 0) head = (h.stdout || '').trim();
+  }
+  return { worktreePath, ok: r.code === 0, head, detail: (r.stdout || '') + (r.stderr || '') };
 }
 
 async function removeWorktree(mainRepo, worktreeBase, prNum) {
@@ -799,6 +912,18 @@ async function runReviewJob(job) {
       verdict: '', general_comment_url: '', inline_count: '?', result_line: '' };
   }
 
+  // 同 head 重复派单: 上一单还在跑时 hub 又派了本单(它当时看不到上一单的结论), 而上一单已经把这个
+  // head 评审完并提交了 review → 再跑一遍纯属重复(2026-08-14 PR #736 实测: 两条 APPROVE + 4 条同位置
+  // inline 落在同一个 head c390e813, 白烧一轮 opus)。此时直接沿用上一单的结论回执, 不再跑 claude。
+  const dup = duplicateReviewOf(job, wt.head);
+  if (dup) {
+    log(`跳过重复 review: PR #${job.pr_num} head ${wt.head.slice(0, 8)} 已由 job ${dup.job_id} 评审并提交(${dup.general_comment_url || '无链接'})`);
+    return { exit_code: 0, verdict: dup.verdict, general_comment_url: dup.general_comment_url,
+      inline_count: dup.inline_count, result_line: dup.result_line, quota: currentQuota(), deduped_of: dup.job_id,
+      log_tail: `本单在 job ${dup.job_id} 运行期间派出, 而该单已对同一个 head ${wt.head.slice(0, 8)} 完成评审并提交 review`
+        + `(${dup.general_comment_url || '无链接'}, 结论 ${dup.verdict})。head 未变, 本机跳过重复评审, 结论沿用上一单。` };
+  }
+
   const ciStatus = job.ci_failed_names
     ? `${job.ci_overall}; failed checks: ${job.ci_failed_names}`
     : job.ci_overall;
@@ -868,7 +993,11 @@ async function runReviewJob(job) {
     reactiveQuotaBlock = { reason: qhit.reason, reset_at: qhit.reset_at };
     log(`⚠️ 命中 Claude 限额(${qhit.reason}), 预计 ${qhit.reset_at ? new Date(qhit.reset_at).toLocaleString() : '?'} 恢复; 本机将上报额度不足`);
   }
-  const savedLog = writeReviewLog(job, r.code, parsed, logText, usage);
+  // 本单确实提交了 review(有结论) → 记下"这个 head 已评审过", 供同 head 重复派单去重(见 duplicateReviewOf)。
+  if (r.code === 0 && parsed.verdict && wt.head) {
+    lastReviewed.set(prKey(job), { job_id: job.job_id, head: wt.head, at: Date.now(), ...parsed });
+  }
+  const savedLog = writeReviewLog(job, r.code, parsed, logText, usage, wt.head);
   if (savedLog) log(`review 完整日志已存: ${savedLog}`);
   return {
     exit_code: r.code,
@@ -892,6 +1021,9 @@ function cancelJob(jobId, reason) {
   const qBefore = queue.length;
   for (let i = queue.length - 1; i >= 0; i--) if (queue[i] && queue[i].job_id === jobId) queue.splice(i, 1);
   const dropped = qBefore - queue.length;
+  // 本单要么被丢出队列、要么在跑但结果不回传(pump 的取消分支提前 return, 走不到收尾的 delete),
+  // 两种都不会再有人查它的去重簿记 → 这里直接清掉, 别在 dispatchedBehind 里留悬挂项。
+  dispatchedBehind.delete(jobId);
   if (runningJob && runningJob.job_id === jobId) {
     log(`收到 hub 取消(${reason || '未说明'}): PR #${runningJob.pr_num} 正在跑, 终止子进程`);
     notify(`🛑 已取消 Review PR #${runningJob.pr_num}`, reason === 'reviewer_swapped' ? '该 PR 已换人, 本机任务终止' : '任务已被服务端取消');
@@ -902,8 +1034,48 @@ function cancelJob(jobId, reason) {
     log(`收到 hub 取消(${reason || '未说明'}): job ${jobId} 不在本机(可能已跑完), 忽略`);
   }
 }
-// 注: 重复派单的防护放在服务端(hub 掉线时保留在途 job + 派单去重), client 不做去重 ——
-// client 信息太少易误拦(如合法的"再来一轮")。client 只负责: 重连 + 把真实结果发回。
+// 重复派单的防护主要在服务端(hub 掉线时保留在途 job + 派单去重); client 只做两件它能确定的事:
+//   1. 同一 (repo, PR) 的【待跑】job 只留最新的一个 —— 见 enqueueJob;
+//   2. 上一单跑完后, 若排在它后面的同 PR job 面对的 head 与它刚评审并提交的 head 一致 → 跳过,
+//      沿用上一单结论 —— 见 duplicateReviewOf。
+// 除此以外一律照跑(尤其"再来一轮"这类合法重派): 宁可重复也不漏。
+const lastReviewed = new Map();        // "repo#pr" → { job_id, head, verdict, ... } 本机已提交 review 的最近一单
+const dispatchedBehind = new Map();    // job_id → 派本单时同 PR 正在跑的 job_id(本单看不到它的结论)
+function prKey(job) { return `${job.repo}#${job.pr_num}`; }
+// 同 head 重复单的判定: 三条同时成立才算 —— 本单是在上一单【还在跑】时派出的(hub 当时看不到上一单
+// 结论, 故不可能是人看完结论主动要的"再来一轮")、上一单确实提交了 review、当前 head 与它评审的 head
+// 一致(有新推送则 head 变 → 照跑)。任一条不满足都返回 null(照跑)。
+function duplicateReviewOf(job, head) {
+  const behind = dispatchedBehind.get(job.job_id);
+  const prev = lastReviewed.get(prKey(job));
+  if (!behind || !head || !prev || prev.job_id !== behind || prev.head !== head) return null;
+  return prev;
+}
+function enqueueJob(job) {
+  // hub 判一单超时的死线从派单起算, 而本机串行排队期间不发 review_progress —— 队列一深, 还没轮到
+  // 的 job 就会被 hub 判失败并重派, 而老 job 仍躺在队列里 → 同一个 head 被 review 两遍。
+  // (2026-08-07 实测: hub 一次派 6 单, #696 排队 33min 被判失败重派, 队列里同时出现两个 #696。)
+  // 两个 job 都还没开跑, 留新的永远不亏: 重试 = 纯重复; 新一轮 = 老的在评审过期 head。
+  const stale = [];
+  for (let i = queue.length - 1; i >= 0; i--) {
+    const q = queue[i];
+    if (q.repo === job.repo && String(q.pr_num) === String(job.pr_num)) stale.unshift(queue.splice(i, 1)[0]);
+  }
+  // 本单派出时同 PR 已有一单在跑 → 记一笔: 那一单的结论 hub 当时看不到, 本单可能只是它的重复
+  // (开跑前用 head 一比就知道, 见 duplicateReviewOf)。
+  if (runningJob && runningJob.repo === job.repo && String(runningJob.pr_num) === String(job.pr_num)) {
+    dispatchedBehind.set(job.job_id, runningJob.job_id);
+  }
+  queue.push(job);
+  for (const s of stale) {
+    logErr(`队列去重: PR #${s.pr_num} 已有新 job ${job.job_id} → 丢弃尚未开跑的旧 job ${s.job_id}`);
+    dispatchedBehind.delete(s.job_id);
+    // 立刻回执, 别让 hub 空等到超时(空等正是重派的成因)。exit 0 + 空 verdict = 没跑出 review。
+    queueResult({ type: 'review_result', job_id: s.job_id, exit_code: 0,
+      log_tail: `尚未开跑就被同 PR 的新 job ${job.job_id} 取代(hub 重派或新一轮), 本机已丢弃本单; 请以新 job 的结果为准`,
+      verdict: '', general_comment_url: '', inline_count: '?', result_line: '' });
+  }
+}
 async function pump() {
   if (busy || !queue.length) return;
   busy = true;
@@ -924,9 +1096,11 @@ async function pump() {
   queueResult({ type: 'review_result', job_id: job.job_id, ...result });
   const uNote = result.usage && result.usage.output_tokens != null
     ? ` · ${result.usage.input_tokens ?? '?'}/${result.usage.output_tokens} tokens $${result.usage.total_cost_usd ?? '?'}` : '';
-  if (result.exit_code === 0 && result.verdict) notify(`✅ Review 完成 PR #${job.pr_num}`, `结论 ${result.verdict} · inline ${result.inline_count}${uNote} · 已用你的账号提交`);
+  if (result.deduped_of) notify(`⏭ 跳过重复 Review PR #${job.pr_num}`, `同 head 已由 job ${result.deduped_of} 评审并提交, 本机未重复跑`);
+  else if (result.exit_code === 0 && result.verdict) notify(`✅ Review 完成 PR #${job.pr_num}`, `结论 ${result.verdict} · inline ${result.inline_count}${uNote} · 已用你的账号提交`);
   else notify(`❌ Review 未完成 PR #${job.pr_num}`, `exit=${result.exit_code} ${(result.log_tail || '').slice(0, 80)}`);
   runningJob = null;
+  dispatchedBehind.delete(job.job_id);
   busy = false;
   setImmediate(pump);
 }
@@ -1114,7 +1288,7 @@ function connect() {
       case 'review_job': {
         log(`got review_job ${msg.job_id} pr=#${msg.pr_num} repo=${msg.repo} branch=${msg.branch}${msg.provider === 'azdo' ? ' provider=azdo' : ''}`);
         notify(`🟡 收到 Review PR #${msg.pr_num}`, `${msg.repo} · ${msg.branch || ''}`);
-        queue.push(msg);
+        enqueueJob(msg);
         pump();
         break;
       }
@@ -1392,6 +1566,16 @@ function startConfigServer() {
         running: runningJob ? [{ repo: runningJob.repo, pr_num: runningJob.pr_num, branch: runningJob.branch, stage: runningJob.stage, since: runningJob.since }] : [],
         queued: queue.map((j) => ({ repo: j.repo, pr_num: j.pr_num })),
       });
+    }
+    // 设置页「额度」tab: 账号套餐 + 5小时/周窗用量与重置时间 + 模型信息(读缓存, 不 spawn claude)。
+    if (req.method === 'GET' && u === '/quota') {
+      quotaSnapshot(false).then((s) => json(200, s)).catch((e) => json(200, { error: e.message }));
+      return;
+    }
+    // 「立即查一次」: 现跑一次 `claude -p /usage`(约 1~3s)再返回最新快照。
+    if (req.method === 'POST' && u === '/quota/refresh') {
+      quotaSnapshot(true).then((s) => json(200, s)).catch((e) => json(200, { error: e.message }));
+      return;
     }
     if (req.method === 'POST' && u === '/config') {
       let b = ''; req.on('data', (c) => { b += c; });

@@ -78,6 +78,29 @@ enum UsageStore {
         return (today, total)
     }
 
+    struct LastReview {
+        var model: String
+        var ts: Date?
+        var repo: String
+        var prNum: String
+    }
+
+    /// 最近一次 review 实际用的模型(服务端派单可用 review_model 覆盖本机配置 → 与配置值可能不同)。
+    static func lastReview(file: String = usageLogFile) -> LastReview? {
+        guard let content = try? String(contentsOfFile: file, encoding: .utf8) else { return nil }
+        let iso = ISO8601DateFormatter()
+        for line in content.split(separator: "\n").reversed() {
+            guard let data = line.data(using: .utf8),
+                  let rec = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let model = rec["model"] as? String, !model.isEmpty else { continue }
+            return LastReview(model: model,
+                              ts: (rec["ts"] as? String).flatMap { iso.date(from: $0) },
+                              repo: rec["repo"] as? String ?? "",
+                              prNum: rec["pr_num"] as? String ?? "")
+        }
+        return nil
+    }
+
     static func format(_ t: Totals) -> String {
         func f(_ n: Int) -> String {
             n >= 1_000_000 ? String(format: "%.1fM", Double(n) / 1e6)

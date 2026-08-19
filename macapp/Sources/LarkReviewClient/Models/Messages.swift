@@ -35,6 +35,7 @@ enum OutboundMessage {
                     "general_comment_url": r.generalCommentUrl, "inline_count": r.inlineCount,
                     "quota": r.quota.jsonObject, "declined_quota": r.declinedQuota]
             if let u = r.usage { obj["usage"] = u.jsonObject }   // token 用量(v1.7+; 无则不带, 旧 hub 兼容)
+            if let d = r.dedupedOf { obj["deduped_of"] = d }   // 同 head 重复单: 未跑 claude, 结论沿用该 job
             return obj
         case let .reconnected(wasBusy, repo, prNum):
             return ["type": "reconnected", "was_busy": wasBusy, "repo": repo,
@@ -84,6 +85,8 @@ struct ReviewResult: Equatable {
     var quota: QuotaStatus = QuotaStatus()
     /// 派活前自查额度不足 → 拒接本单(未跑 review), 交服务端改派。
     var declinedQuota: Bool = false
+    /// 同 head 重复派单被跳过 → 这里记被沿用结论的那一单 job_id(未跑 claude; nil = 正常跑的单)。
+    var dedupedOf: String?
     /// token 用量(nil = 本机 claude 不支持 json 输出), 服务端记账用。
     var usage: ReviewUsage?
 }

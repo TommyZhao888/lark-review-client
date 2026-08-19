@@ -9,6 +9,8 @@ enum WorktreeManager {
         var worktreePath: String
         var ok: Bool
         var detail: String
+        /// 本次评审的 head（worktree 已 reset 到该 PR 分支最新提交）：同 head 重复派单去重 + 日志头标注。
+        var head: String = ""
     }
 
     static func ensureWorktree(
@@ -52,7 +54,12 @@ enum WorktreeManager {
             }
         }
 
-        return EnsureResult(worktreePath: worktreePath, ok: r.code == 0, detail: r.stdout + r.stderr)
+        var head = ""
+        if r.code == 0 {
+            let h = await ProcessRunner.run("git", ["-C", worktreePath, "rev-parse", "HEAD"])
+            if h.code == 0 { head = h.stdout.trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
+        return EnsureResult(worktreePath: worktreePath, ok: r.code == 0, detail: r.stdout + r.stderr, head: head)
     }
 
     static func removeWorktree(mainRepo: String, worktreeBase: String, prNum: Int) async {

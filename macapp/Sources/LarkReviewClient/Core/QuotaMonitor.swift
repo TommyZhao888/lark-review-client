@@ -23,6 +23,47 @@ struct QuotaStatus: Equatable {
     }
 }
 
+/// 一个额度窗的展示值(设置页「额度」tab; 与 Node /quota 的 five_hour/seven_day/model_windows 对齐)。
+struct QuotaWindow: Identifiable, Equatable {
+    var name: String
+    var pct: Int?
+    var resetAtMs: Int?
+    var id: String { name }
+    var resetAt: Date? { resetAtMs.map { Date(timeIntervalSince1970: Double($0) / 1000) } }
+}
+
+/// 查额度失败记录(设置页据此解释"为何没有百分比")。
+struct QuotaFailNote: Equatable {
+    var at: Date
+    var reason: String
+}
+
+/// 额度快照(仅展示, 不上报): 百分比给缓存原值 —— 过期也照给, 由 fresh/updatedAt 让 UI 标注,
+/// 而 ok/reason/resetAt 与上报服务端的判定完全一致(过期即视为未知)。
+struct QuotaSnapshot {
+    var ok = true
+    var reason: String?
+    var resetAt: Date?
+    var fiveHour = QuotaWindow(name: "5 小时窗(current session)")
+    var sevenDay = QuotaWindow(name: "周窗(7 天, 全部模型)")
+    var modelWindows: [QuotaWindow] = []
+    var updatedAt: Date?
+    var fresh = false
+    var lastError: QuotaFailNote?
+    var raw = ""
+}
+
+/// 本机 claude 的账号套餐/版本(`claude auth status` + `--version`; 设置页展示用)。
+struct ClaudeAccountInfo {
+    var loggedIn: Bool?
+    var authMethod: String?
+    var subscriptionType: String?
+    var email: String?
+    var orgName: String?
+    var version: String?
+    var error: String?
+}
+
 /// 额度感知(与 Node 版逐字段对齐):
 ///  - 反应式(可靠底座): review 命中限额时 claude 输出含 "You've hit your ... limit ... resets ...",
 ///    解析出重置时间, 在此之前上报"额度不足"。
@@ -45,6 +86,10 @@ final class QuotaMonitor {
     private var usageAt: Date = .distantPast
     private let usageFreshSec: TimeInterval = 1500  // 25min 内视为新鲜(必须 > 轮询间隔 10min, 且容忍一次失败轮询);
                                                     // 否则值会在两次刷新之间被判过期 → hub 闪断显示 —。宁可短时展示稍旧值也持续显示到下次刷新。
+    private var usageModelWindows: [QuotaWindow] = []   // 「按模型」周窗(如 Opus), 仅展示
+    private var usageRawText = ""                       // 最近一次 /usage 原文(仅展示/排查, 不上报)
+    private var usageLastError: QuotaFailNote?          // 最近一次查额度失败(成功即清空)
+    private var usageNoPersist = true                   // 本机 claude 认 --no-session-persistence(不认则首次失败后关掉)
 
     /// 每次 review 跑完喂入其输出, 命中限额则记下重置时间。
     func noteReviewOutput(_ logText: String) {
@@ -131,20 +176,47 @@ final class QuotaMonitor {
     /// 跑 `<quotaClaudePath> -p /usage --output-format json`, 解析 session(5小时)/week 百分比+重置时间, 更新缓存。
     /// 返回是否刷新出新鲜额度(供上层决定要不要独立上报一次 .quota; 与 Node 版"仅解析成功才 send"对齐)。
     @discardableResult
-    func refreshUsage(config: Config) async -> Bool {
+    func refreshUsage(config: Config, isRetry: Bool = false) async -> Bool {
         // --dangerously-skip-permissions: 跳过 claude 沙盒/权限初始化, 避免经 sandboxd 探测 Apple Music/媒体库
         // → 免得给成员弹"访问媒体库"授权(claude 行为被归因到本 app, 与 review 无关)。/usage 只读本地无副作用。
         let bin = config.effectiveQuotaClaudePath
         // 25s 超时(对齐 Node 版): 非 claude 的引擎会把 "/usage" 当普通提问跑一整轮, 不设上限会把这条轮询卡死。
-        let r = await ProcessRunner.run(bin, ["-p", "/usage", "--output-format", "json", "--dangerously-skip-permissions"],
-                                        timeoutMs: 25000)
+        let r = await ProcessRunner.run(bin, Self.usageArgs(noSessionPersistence: usageNoPersist), timeoutMs: 25000)
         var text = r.stdout
         if let data = r.stdout.data(using: .utf8),
            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
            let res = obj["result"] as? String { text = res }
-        if parseUsageText(text) { return true }
-        LogStore.shared.log("查额度(/usage)失败[\(bin)]: \(usageFailReason(code: r.code, text: text, stderr: r.stderr))")
+        if parseUsageText(text) {
+            usageRawText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            usageLastError = nil
+            return true
+        }
+        // 老版 claude 不认 --no-session-persistence → 去掉重试一次(重试时该开关已关, 不会再递归)。
+        if !isRetry, usageNoPersist, Self.isUnknownOptionError(r.stderr + text) {
+            usageNoPersist = false
+            LogStore.shared.log("查额度(/usage): 本机 claude 不认 --no-session-persistence, 去掉该开关重试"
+                                + "(此后每次查额度会在 ~/.claude 留一条会话记录)")
+            return await refreshUsage(config: config, isRetry: true)
+        }
+        let reason = usageFailReason(code: r.code, text: text, stderr: r.stderr)
+        usageLastError = QuotaFailNote(at: Date(), reason: reason)
+        LogStore.shared.log("查额度(/usage)失败[\(bin)]: \(reason)")
         return false
+    }
+
+    /// 探针参数。默认带 --no-session-persistence: 不加的话 claude 会把每次 /usage 存成一条会话记录
+    /// (实测 claude 2.1.235: 每次 ~55KB, 每 10 分钟一条 → 一天 ~8MB, 还把成员的 `claude --resume`
+    /// 列表刷满零轮次的 /usage 会话)。与 Node 版 usageArgs() 逐字对齐。
+    static func usageArgs(noSessionPersistence: Bool) -> [String] {
+        var a = ["-p", "/usage", "--output-format", "json", "--dangerously-skip-permissions"]
+        if noSessionPersistence { a.append("--no-session-persistence") }
+        return a
+    }
+
+    /// 命令行开关不被识别(老版 claude / 非 claude 引擎)。与 Node 版 /unknown (option|flag)/i 对齐。
+    static func isUnknownOptionError(_ text: String) -> Bool {
+        let t = text.lowercased()
+        return t.contains("unknown option") || t.contains("unknown flag")
     }
 
     /// 额度查询失败时给出可行动的原因(别笼统甩"解析失败": 排查全靠这一行日志)。与 Node 版 usageFailReason 对齐。
@@ -163,8 +235,9 @@ final class QuotaMonitor {
     }
 
     /// 解析 /usage 文本: "Current session: N% used · resets ..."(5小时窗)/ "Current week (all models): M% used · resets ..."。
+    /// 另收「按模型」的周窗行(如 "Current week (Opus): 12% used"): 仅供设置页展示, 不参与判定, 也不上报。
     @discardableResult
-    private func parseUsageText(_ text: String) -> Bool {
+    func parseUsageText(_ text: String) -> Bool {   // internal: 供单测直接喂 /usage 文本
         var got = false
         if let g = firstMatch(#"Current session:\s*(\d+)%\s*used(?:[^\n]*?\bresets\s*([^\n(]+))?"#, text),
            let p = g[1].flatMap({ Int($0) }) {
@@ -174,7 +247,13 @@ final class QuotaMonitor {
            let p = g[1].flatMap({ Int($0) }) {
             usageSevenDayPct = p; usageSevenDayResetMs = parseUsageReset(g[2] ?? ""); got = true
         }
-        if got { usageAt = Date() }
+        var windows: [QuotaWindow] = []
+        for g in allMatches(#"Current week \(([^)\n]+)\):\s*(\d+)%\s*used(?:[^\n]*?\bresets\s*([^\n(]+))?"#, text) {
+            guard let name = g[1]?.trimmingCharacters(in: .whitespaces), let p = g[2].flatMap({ Int($0) }) else { continue }
+            if name.lowercased() == "all models" { continue }   // 总量那行已单独解析
+            windows.append(QuotaWindow(name: name, pct: p, resetAtMs: parseUsageReset(g[3] ?? "")))
+        }
+        if got { usageAt = Date(); usageModelWindows = windows }
         return got
     }
 
@@ -196,6 +275,56 @@ final class QuotaMonitor {
         return Int(d.timeIntervalSince1970 * 1000)
     }
 
+    // MARK: - 设置页「额度」tab
+
+    /// 展示快照: 额度判定 + 各窗百分比/重置时间 + 数据新鲜度 + 最近失败原因 + /usage 原文。
+    func snapshot(config: Config) -> QuotaSnapshot {
+        let q = current(config: config)
+        var s = QuotaSnapshot()
+        s.ok = q.ok
+        s.reason = q.reason
+        s.resetAt = q.resetAtMs.map { Date(timeIntervalSince1970: Double($0) / 1000) }
+        s.fiveHour = QuotaWindow(name: "5 小时窗(current session)", pct: usageFiveHourPct, resetAtMs: usageFiveHourResetMs)
+        s.sevenDay = QuotaWindow(name: "周窗(7 天, 全部模型)", pct: usageSevenDayPct, resetAtMs: usageSevenDayResetMs)
+        s.modelWindows = usageModelWindows
+        s.updatedAt = usageAt == .distantPast ? nil : usageAt
+        s.fresh = Date().timeIntervalSince(usageAt) < usageFreshSec
+        s.lastError = usageLastError
+        s.raw = usageRawText
+        return s
+    }
+
+    /// 账号套餐 + claude 版本(按需查 + 5min 缓存): 只在有人打开设置页时 spawn, 不进派活链路。
+    private var account: ClaudeAccountInfo?
+    private var accountAt: Date = .distantPast
+    private let accountTtlSec: TimeInterval = 300
+
+    func accountInfo(config: Config, force: Bool = false) async -> ClaudeAccountInfo {
+        if !force, let account, Date().timeIntervalSince(accountAt) < accountTtlSec { return account }
+        let bin = config.effectiveQuotaClaudePath
+        async let statusRun = ProcessRunner.run(bin, ["auth", "status"], timeoutMs: 15000)
+        async let versionRun = ProcessRunner.run(bin, ["--version"], timeoutMs: 15000)
+        let (st, ver) = await (statusRun, versionRun)
+        var info = ClaudeAccountInfo()
+        if let data = st.stdout.data(using: .utf8),
+           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            info.loggedIn = obj["loggedIn"] as? Bool
+            info.authMethod = obj["authMethod"] as? String
+            info.subscriptionType = obj["subscriptionType"] as? String
+            info.email = obj["email"] as? String
+            info.orgName = obj["orgName"] as? String
+        } else {
+            info.error = "`\(bin) auth status` 没给出 JSON(退出码 \(st.code)) —— claude 版本过旧, 或它不是真 claude"
+        }
+        if ver.code == 0 {
+            info.version = ver.stdout.split(separator: "\n").first
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+        account = info
+        accountAt = Date()
+        return info
+    }
+
     // MARK: - helpers
 
     private func ms(_ d: Date) -> Int { Int(d.timeIntervalSince1970 * 1000) }
@@ -211,5 +340,17 @@ final class QuotaMonitor {
             groups.append(r.location == NSNotFound ? nil : ns.substring(with: r))
         }
         return groups
+    }
+
+    /// 返回所有匹配的各捕获组(组 0 = 整体)。大小写不敏感。
+    private func allMatches(_ pattern: String, _ text: String) -> [[String?]] {
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
+        let ns = text as NSString
+        return re.matches(in: text, range: NSRange(location: 0, length: ns.length)).map { m in
+            (0..<m.numberOfRanges).map { i in
+                let r = m.range(at: i)
+                return r.location == NSNotFound ? nil : ns.substring(with: r)
+            }
+        }
     }
 }

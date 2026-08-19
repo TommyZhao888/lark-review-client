@@ -1,8 +1,12 @@
 import Foundation
 
 /// review 任务串行执行（对齐 Node 版 pump/runReviewJob）：一次只跑一单，避免本机多个
-/// claude 抢资源。重复派单的防护在服务端（hub 掉线时保留在途 job + 派单去重），
-/// client 不做去重——只负责重连 + 把真实结果发回。
+/// claude 抢资源。重复派单的防护主要在服务端（hub 掉线时保留在途 job + 派单去重）；
+/// client 只做两件它能确定的事：
+///   1. 同一 (repo, PR) 的【待跑】job 只留最新的一个 —— 见 enqueue；
+///   2. 上一单跑完后，若排在它后面的同 PR job 面对的 head 与它刚评审并提交的 head 一致 → 跳过，
+///      沿用上一单结论 —— 见 DuplicateGuard。
+/// 除此以外一律照跑（尤其“再来一轮”这类合法重派）：宁可重复也不漏。
 @MainActor
 final class ReviewCoordinator {
 
@@ -26,9 +30,30 @@ final class ReviewCoordinator {
     private var cancelRequested = false
     /// 本机 claude 是否支持 stream-json(nil=未知; 首次没拿到 result 事件 → 记 false 走 json)。
     private var streamJsonSupported: Bool?
+    /// 当前在跑的 job(同 head 去重要知道"本单排在谁后面"; 对齐 Node 版 runningJob)。
+    private var runningJob: ReviewJob?
+    private let dupGuard = DuplicateGuard()
 
     func enqueue(_ job: ReviewJob) {
+        // hub 判一单超时的死线从派单起算, 而本机串行排队期间不发 review_progress —— 队列一深, 还没
+        // 轮到的 job 就会被 hub 判失败并重派, 而老 job 仍躺在队列里 → 同一个 head 被 review 两遍。
+        // (2026-08-07 实测: hub 一次派 6 单, #696 排队 33min 被判失败重派, 队列里同时出现两个 #696。)
+        // 两个 job 都还没开跑, 留新的永远不亏: 重试 = 纯重复; 新一轮 = 老的在评审过期 head。
+        // 已开跑的那单不动(它可能正在评审老 head, 新一轮理应排在它后面) —— 但记下"本单排在谁后面":
+        // 那一单的结论 hub 派本单时还看不到, 本单可能只是它的重复(开跑前用 head 一比就知道)。
+        dupGuard.noteDispatch(job, runningJob: runningJob)
+        let stale = queue.filter { $0.repo == job.repo && $0.pr_num == job.pr_num }
+        queue.removeAll { $0.repo == job.repo && $0.pr_num == job.pr_num }
         queue.append(job)
+        for s in stale {
+            LogStore.shared.log("队列去重: PR #\(s.pr_num) 已有新 job \(job.job_id) → 丢弃尚未开跑的旧 job \(s.job_id)")
+            dupGuard.forget(s.job_id)
+            // 立刻回执, 别让 hub 空等到超时(空等正是重派的成因)。exit 0 + 空 verdict = 没跑出 review。
+            let r = ReviewResult(exitCode: 0, logTail: "尚未开跑就被同 PR 的新 job \(job.job_id) 取代"
+                                 + "(hub 重派或新一轮), 本机已丢弃本单; 请以新 job 的结果为准")
+            let msg = OutboundMessage.reviewResult(jobId: s.job_id, result: r)
+            if let payload = try? msg.encodedString() { queueResult(s.job_id, payload) } else { sendMessage(msg) }
+        }
         onQueueChange?(queue)
         pump()
     }
@@ -48,6 +73,7 @@ final class ReviewCoordinator {
         cancelRequested = false
         onCancelChange?(false)
         let job = queue.removeFirst()
+        runningJob = job
         onQueueChange?(queue)
         onJobStart?(job)
         Task { @MainActor in
@@ -60,6 +86,8 @@ final class ReviewCoordinator {
                 sendMessage(msg)   // 序列化异常兜底(理论不可达): 至少尽力直发一次
             }
             onJobFinish?(job, result)
+            runningJob = nil
+            dupGuard.forget(job.job_id)
             busy = false
             pump()
         }
@@ -110,6 +138,24 @@ final class ReviewCoordinator {
         }
         if cancelRequested {
             return ReviewResult(exitCode: 130, logTail: "本次 Review 在准备阶段(worktree)被手动终止")
+        }
+
+        // 同 head 重复派单: 上一单还在跑时 hub 又派了本单(它当时看不到上一单的结论), 而上一单已经把这个
+        // head 评审完并提交了 review → 再跑一遍纯属重复(2026-08-14 PR #736 实测: 两条 APPROVE + 4 条同位置
+        // inline 落在同一个 head c390e813, 白烧一轮 opus)。此时直接沿用上一单的结论回执, 不再跑 claude。
+        if let dup = dupGuard.duplicate(of: job, head: wt.head) {
+            let url = dup.generalCommentUrl.isEmpty ? "无链接" : dup.generalCommentUrl
+            let short = String(wt.head.prefix(8))
+            LogStore.shared.log("跳过重复 review: PR #\(job.pr_num) head \(short) 已由 job \(dup.jobId) 评审并提交(\(url))")
+            var r = ReviewResult(
+                exitCode: 0,
+                logTail: "本单在 job \(dup.jobId) 运行期间派出, 而该单已对同一个 head \(short) 完成评审并提交 review"
+                    + "(\(url), 结论 \(dup.verdict))。head 未变, 本机跳过重复评审, 结论沿用上一单。",
+                resultLine: dup.resultLine, verdict: dup.verdict,
+                generalCommentUrl: dup.generalCommentUrl, inlineCount: dup.inlineCount,
+                quota: QuotaMonitor.shared.current(config: cfg))
+            r.dedupedOf = dup.jobId
+            return r
         }
 
         let ciStatus = ciStatusString(overall: job.ci_overall, failedNames: job.ci_failed_names)
@@ -215,9 +261,60 @@ final class ReviewCoordinator {
             quota: QuotaMonitor.shared.current(config: cfg),   // 让服务端立即知道本机额度状态
             usage: usage
         )
-        if let saved = LogStore.shared.writeReviewLog(job: job, model: model, exitCode: r.code, result: result, logText: logText) {
+        // 本单确实提交了 review(有结论) → 记下"这个 head 已评审过", 供同 head 重复派单去重。
+        if r.code == 0, !parsed.verdict.isEmpty, !wt.head.isEmpty {
+            dupGuard.noteReviewed(job, head: wt.head, result: result)
+        }
+        if let saved = LogStore.shared.writeReviewLog(job: job, model: model, exitCode: r.code, result: result,
+                                                      logText: logText, head: wt.head) {
             LogStore.shared.log("review 完整日志已存: \(saved)")
         }
         return result
+    }
+}
+
+/// 同 head 重复派单的判定（与 Node 版 dispatchedBehind / lastReviewed / duplicateReviewOf 逐条对齐）。
+/// 纯状态机、不碰 IO：本机内存态，进程重启清零无碍（只影响一个 review 时段内的去重）。
+@MainActor
+final class DuplicateGuard {
+
+    /// 本机已提交过 review 的那一单（沿用它的结论时要原样回执给 hub）。
+    struct Done: Equatable {
+        var jobId: String
+        var head: String
+        var verdict: String
+        var generalCommentUrl: String
+        var inlineCount: String
+        var resultLine: String
+    }
+
+    private var behind: [String: String] = [:]   // job_id → 派本单时同 (repo,PR) 正在跑的 job_id
+    private var done: [String: Done] = [:]       // "repo#pr" → 本机最近一单已提交的 review
+
+    static func key(_ job: ReviewJob) -> String { "\(job.repo)#\(job.pr_num)" }
+
+    /// 入队时：同 (repo,PR) 已有一单在跑 → 记下本单「排在谁后面」（它的结论 hub 派本单时看不到）。
+    func noteDispatch(_ job: ReviewJob, runningJob: ReviewJob?) {
+        guard let run = runningJob, run.repo == job.repo, run.pr_num == job.pr_num else { return }
+        behind[job.job_id] = run.job_id
+    }
+
+    /// 本单确实提交了 review → 记下「这个 head 已评审过」。
+    func noteReviewed(_ job: ReviewJob, head: String, result: ReviewResult) {
+        done[Self.key(job)] = Done(jobId: job.job_id, head: head, verdict: result.verdict,
+                                   generalCommentUrl: result.generalCommentUrl,
+                                   inlineCount: result.inlineCount, resultLine: result.resultLine)
+    }
+
+    /// 本单收尾/被丢弃 → 清掉它的排队关系（只留 done，供后续单比 head）。
+    func forget(_ jobId: String) { behind.removeValue(forKey: jobId) }
+
+    /// 三条同时成立才算同 head 重复单：本单是在上一单【还在跑】时派出的（hub 当时看不到上一单结论，
+    /// 故不可能是人看完结论主动要的「再来一轮」）、上一单确实提交了 review、当前 head 与它评审的
+    /// head 一致（有新推送则 head 变 → 照跑）。任一条不满足都返回 nil（照跑）。
+    func duplicate(of job: ReviewJob, head: String) -> Done? {
+        guard let b = behind[job.job_id], !head.isEmpty,
+              let prev = done[Self.key(job)], prev.jobId == b, prev.head == head else { return nil }
+        return prev
     }
 }
