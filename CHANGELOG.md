@@ -1,5 +1,32 @@
 # 更新说明
 
+## v1.10.3 — 2026-09-01
+
+> 一件事:**失败的单不再在本机"查无此案"**。hub 的失败卡片让你「详见你本机日志」,而 claude
+> 起跑前就结束的单在本机一行日志都不写;顺带把造成这次事故的坏 worktree 修成能自愈。
+
+### 早退失败必落盘(双端)
+
+- 在启动 claude **之前**就结束的单(repo 未参与 / clone 失败 / worktree 失败 / 准备阶段被终止 /
+  同 head 去重)此前只把原因塞进回执发给 hub,本机**既不写运行日志、也不落 review 日志** ——
+  卡片那句「详见你本机日志」是空头支票,原因只存在于一条转瞬即逝的系统通知里。
+- 现在这些分支统一走一个出口:**写一行运行日志 + 照常落一份 review 日志**(日志头 `model=-`
+  表示本单没跑到 claude)。契约变成:**只要 hub 收到回执,本机就查得到这一单。**
+- 2026-09-01 实测:PR #916 连续两次派单,本机运行日志都停在 `worktree exists, refreshing to …`
+  之后一片空白,`~/.lark-review-client-logs/` 里也没有对应文件,成员翻不到任何线索。
+
+### worktree 自愈(双端)
+
+- 主仓 `.git/worktrees/<name>` 的 admin 目录被并发的 `worktree remove` / `prune` 清掉后,
+  工作树目录还在但**已不是 git 仓库** → `reset --hard` 永远 `fatal: not a git repository`,
+  该 PR **每次重派都必然失败**,形成死循环(上面 PR #916 正是这么卡住的)。
+- 现在刷新失败会**删掉目录 + `worktree prune` + 重建**;azdo 的 `refs/pull/<id>/merge` 兜底
+  照旧在后面接着兜。
+- 建树(重建与首建)一律 `worktree add --detach origin/<branch>`,**不再检出本地分支**:本地分支
+  只靠工作树里那句 `reset --hard origin/<branch>` 推进,而重建的前提恰恰是那句挂了 ——
+  `worktree add <path> <branch>` 会**静默检出一个旧 commit 并返回成功**,拿旧代码跑完整 review
+  发到 PR,比响亮失败更糟(首建路径在 `removeWorktree` / 定期清理之后有同样的隐患)。
+
 ## v1.10.2 — 2026-08-19
 
 > 三件事:①设置页/配置页新增「额度」tab,额度不再只是一个"够/不够"的布尔量;②本机加两道

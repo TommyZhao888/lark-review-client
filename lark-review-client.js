@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json / package-lock.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.10.2';
+const CLIENT_VERSION = '1.10.3';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -522,8 +522,15 @@ function notify(title, message) {
 const REVIEW_LOG_DIR = process.env.LARK_REVIEW_CLIENT_REVIEW_LOG_DIR || path.join(os.homedir(), '.lark-review-client-logs');
 try { fs.mkdirSync(REVIEW_LOG_DIR, { recursive: true }); } catch { /* ignore */ }
 
+// 多行 stdout/stderr 压成一行摘要, 供运行日志单行记录(完整内容另进 review 日志)。
+function oneLine(s, max = 300) {
+  const t = String(s || '').split(/\r?\n/).join(' ').trim();
+  return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
 // 把一次 review 的完整输出(claude stdout+stderr)写入本机日志文件, 返回路径。
-function writeReviewLog(job, code, parsed, logText, usage, head) {
+// model 可显式传入: 早退的单(没跑到 claude)记 "-", 免得日志头挂一个其实没用上的模型名。
+function writeReviewLog(job, code, parsed, logText, usage, head, model) {
   try {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const file = path.join(REVIEW_LOG_DIR, `pr-${job.pr_num}-${ts}.log`);
@@ -532,7 +539,7 @@ function writeReviewLog(job, code, parsed, logText, usage, head) {
       : '';
     const header =
       `# PR #${job.pr_num}  repo=${job.repo}  branch=${job.branch}  head=${(head || '').slice(0, 8) || '-'}\n` +
-      `# job=${job.job_id}  model=${job.review_model || cfg.reviewModel}  time=${new Date().toISOString()}\n` +
+      `# job=${job.job_id}  model=${model || job.review_model || cfg.reviewModel}  time=${new Date().toISOString()}\n` +
       `# exit=${code}  verdict=${parsed.verdict || '-'}  inline=${parsed.inline_count}  general_comment=${parsed.general_comment_url || '-'}\n` +
       uLine +
       `${'#'.repeat(64)}\n\n`;
@@ -800,6 +807,9 @@ function run(cmd, args, opts = {}) {
 }
 
 // ---------- worktree 管理（复刻 worker.sh STAGE 6）----------
+// 建树一律 `worktree add --detach origin/<branch>`, 不用本地分支: 本地分支只靠工作树里那句
+// `reset --hard origin/<branch>` 推进, 而重建的前提正是那句挂了 → `add <path> <branch>` 会静默
+// 检出一个旧 commit 并返回成功, 拿旧代码跑完整 review 发到 PR(比响亮失败更糟)。
 async function ensureWorktree(mainRepo, worktreeBase, prNum, branch, provider) {
   const worktreePath = path.join(worktreeBase, `pr-${prNum}`);
   const env = { ...process.env, GIT_LFS_SKIP_SMUDGE: '1' };
@@ -809,14 +819,22 @@ async function ensureWorktree(mainRepo, worktreeBase, prNum, branch, provider) {
     log(`worktree exists, refreshing to origin/${branch}`);
     await run('git', ['-C', mainRepo, 'fetch', 'origin', branch], { env });
     r = await run('git', ['-C', worktreePath, 'reset', '--hard', `origin/${branch}`], { env });
-    if (r.code === 0) await run('git', ['-C', worktreePath, 'clean', '-fd'], { env });
+    if (r.code === 0) {
+      await run('git', ['-C', worktreePath, 'clean', '-fd'], { env });
+    } else {
+      // 刷新失败多半是工作树本身坏了, 最常见的是主仓 .git/worktrees/<name> admin 目录被并发的
+      // worktree remove/prune 清掉: 目录还在但已不是 git 仓库 → reset 永远 fatal, 该 PR 每次
+      // 重派都必然失败(2026-09-01 PR #916 实测, 连续重派全挂在这里)。删掉重建, 别让一次损坏
+      // 把这个 PR 永久卡死。
+      log(`worktree 刷新失败, 删除后重建: ${oneLine((r.stdout || '') + (r.stderr || ''))}`);
+      try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
+      await run('git', ['-C', mainRepo, 'worktree', 'prune'], { env });
+      r = await run('git', ['-C', mainRepo, 'worktree', 'add', '--detach', worktreePath, `origin/${branch}`], { env });
+    }
   } else {
     log(`creating worktree ${worktreePath}`);
     await run('git', ['-C', mainRepo, 'fetch', 'origin', branch], { env });
-    r = await run('git', ['-C', mainRepo, 'worktree', 'add', worktreePath, branch], { env });
-    if (r.code !== 0) {
-      r = await run('git', ['-C', mainRepo, 'worktree', 'add', '--detach', worktreePath, `origin/${branch}`], { env });
-    }
+    r = await run('git', ['-C', mainRepo, 'worktree', 'add', '--detach', worktreePath, `origin/${branch}`], { env });
   }
   // Azure DevOps 兜底: 按源分支名 fetch 失败(分支名带特殊字符/权限差异)时,
   // 改用 ADO 发布的 PR 合并引用 refs/pull/<id>/merge(等价 GitHub 的 pull/N/merge)。
@@ -881,10 +899,22 @@ function parseResult(logText) {
   return { result_line: last[0], verdict: last[1], general_comment_url: last[2], inline_count: last[3] };
 }
 
+// claude 起跑前就结束的单(未参与 / 额度拒接 / clone 失败 / worktree 失败 / 同 head 去重)的统一
+// 出口: 写一行运行日志 + 照常落一份 review 日志。hub 的失败卡片会让成员「详见你本机日志」——
+// 任何一条静默的早退路径都会让那句话变成空头支票(2026-09-01 PR #916: worktree 的 admin 目录
+// 丢失, 连续两次派单在本机全程零日志, 原因只存在于发给 hub 的回执里)。
+function earlyExit(job, result, note, head = '') {
+  log(`PR #${job.pr_num} ${note}`);
+  const saved = writeReviewLog(job, result.exit_code, result, result.log_tail, result.usage || null, head, '-');
+  if (saved) log(`review 日志已存: ${saved}`);
+  return result;
+}
+
 async function runReviewJob(job) {
   // hub 已校验 repo，这里再防一手: 本机配置过, 或 autoRepos 下服务端受管即参与。
   if (!repoParticipating(job.repo)) {
-    return { exit_code: 1, log_tail: `本机未配置且未自动参与 repo ${job.repo}`, verdict: '', general_comment_url: '', inline_count: '?', result_line: '' };
+    return earlyExit(job, { exit_code: 1, log_tail: `本机未配置且未自动参与 repo ${job.repo}`, verdict: '', general_comment_url: '', inline_count: '?', result_line: '' },
+      `本机未配置且未自动参与 repo ${job.repo}, 拒接`);
   }
   const conf = resolveRepoConf(job.repo);
 
@@ -893,23 +923,25 @@ async function runReviewJob(job) {
   await pollUsage();
   const q0 = currentQuota();
   if (q0.ok === false) {
-    log(`派活前自查: Claude 额度不足(${q0.reason || '?'}), 拒接 PR #${job.pr_num}, 交服务端改派`);
-    return { exit_code: 0, log_tail: `本机 Claude 额度不足(${q0.reason || ''}), 已拒接本单, 交由服务端改派给有额度的人`,
-      verdict: '', general_comment_url: '', inline_count: '?', result_line: '', quota: q0, declined_quota: true };
+    return earlyExit(job, { exit_code: 0, log_tail: `本机 Claude 额度不足(${q0.reason || ''}), 已拒接本单, 交由服务端改派给有额度的人`,
+      verdict: '', general_comment_url: '', inline_count: '?', result_line: '', quota: q0, declined_quota: true },
+      `派活前自查: Claude 额度不足(${q0.reason || '?'}), 拒接本单, 交服务端改派`);
   }
 
   // mainRepo 尚不存在(自动模式的首个 job, 或手动配了路径但还没 clone)→ 先从远端自动 clone。
   const cl = await ensureRepoCloned(job, conf.mainRepo);
   if (!cl.ok) {
-    return { exit_code: 1, log_tail: `仓库准备失败(自动 clone):\n${cl.detail}`.slice(-4000),
-      verdict: '', general_comment_url: '', inline_count: '?', result_line: '' };
+    return earlyExit(job, { exit_code: 1, log_tail: `仓库准备失败(自动 clone):\n${cl.detail}`.slice(-4000),
+      verdict: '', general_comment_url: '', inline_count: '?', result_line: '' },
+      `仓库准备失败(自动 clone): ${oneLine(cl.detail)}`);
   }
 
   send({ type: 'review_progress', job_id: job.job_id, stage: 'worktree' });
   const wt = await ensureWorktree(conf.mainRepo, conf.worktreeBase, job.pr_num, job.branch, job.provider);
   if (!wt.ok) {
-    return { exit_code: 1, log_tail: `worktree 准备失败:\n${wt.detail}`.slice(-4000),
-      verdict: '', general_comment_url: '', inline_count: '?', result_line: '' };
+    return earlyExit(job, { exit_code: 1, log_tail: `worktree 准备失败:\n${wt.detail}`.slice(-4000),
+      verdict: '', general_comment_url: '', inline_count: '?', result_line: '' },
+      `worktree 准备失败: ${oneLine(wt.detail)}`);
   }
 
   // 同 head 重复派单: 上一单还在跑时 hub 又派了本单(它当时看不到上一单的结论), 而上一单已经把这个
@@ -917,11 +949,11 @@ async function runReviewJob(job) {
   // inline 落在同一个 head c390e813, 白烧一轮 opus)。此时直接沿用上一单的结论回执, 不再跑 claude。
   const dup = duplicateReviewOf(job, wt.head);
   if (dup) {
-    log(`跳过重复 review: PR #${job.pr_num} head ${wt.head.slice(0, 8)} 已由 job ${dup.job_id} 评审并提交(${dup.general_comment_url || '无链接'})`);
-    return { exit_code: 0, verdict: dup.verdict, general_comment_url: dup.general_comment_url,
+    return earlyExit(job, { exit_code: 0, verdict: dup.verdict, general_comment_url: dup.general_comment_url,
       inline_count: dup.inline_count, result_line: dup.result_line, quota: currentQuota(), deduped_of: dup.job_id,
       log_tail: `本单在 job ${dup.job_id} 运行期间派出, 而该单已对同一个 head ${wt.head.slice(0, 8)} 完成评审并提交 review`
-        + `(${dup.general_comment_url || '无链接'}, 结论 ${dup.verdict})。head 未变, 本机跳过重复评审, 结论沿用上一单。` };
+        + `(${dup.general_comment_url || '无链接'}, 结论 ${dup.verdict})。head 未变, 本机跳过重复评审, 结论沿用上一单。` },
+      `跳过重复 review: head ${wt.head.slice(0, 8)} 已由 job ${dup.job_id} 评审并提交(${dup.general_comment_url || '无链接'})`, wt.head);
   }
 
   const ciStatus = job.ci_failed_names
@@ -997,7 +1029,7 @@ async function runReviewJob(job) {
   if (r.code === 0 && parsed.verdict && wt.head) {
     lastReviewed.set(prKey(job), { job_id: job.job_id, head: wt.head, at: Date.now(), ...parsed });
   }
-  const savedLog = writeReviewLog(job, r.code, parsed, logText, usage, wt.head);
+  const savedLog = writeReviewLog(job, r.code, parsed, logText, usage, wt.head, model);
   if (savedLog) log(`review 完整日志已存: ${savedLog}`);
   return {
     exit_code: r.code,

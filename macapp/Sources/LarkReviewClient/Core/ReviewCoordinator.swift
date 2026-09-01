@@ -93,11 +93,26 @@ final class ReviewCoordinator {
         }
     }
 
+    /// claude 起跑前就结束的单(未参与 / 额度拒接 / clone 失败 / worktree 失败 / 准备阶段被终止 /
+    /// 同 head 去重)的统一出口: 写一行运行日志 + 照常落一份 review 日志。
+    /// hub 的失败卡片会让成员「详见你本机日志」—— 任何一条静默的早退路径都会让那句话变成空头支票
+    /// (2026-09-01 PR #916: worktree 的 admin 目录丢失, 连续两次派单在本机全程零日志, 原因只存在于
+    /// 一条转瞬即逝的系统通知和发给 hub 的回执里)。model 记 "-" 表示本单没跑到 claude。
+    private func earlyExit(_ job: ReviewJob, _ result: ReviewResult, _ note: String, head: String = "") -> ReviewResult {
+        LogStore.shared.log("PR #\(job.pr_num) \(note)")
+        if let saved = LogStore.shared.writeReviewLog(job: job, model: "-", exitCode: Int32(result.exitCode),
+                                                      result: result, logText: result.logTail, head: head) {
+            LogStore.shared.log("review 日志已存: \(saved)")
+        }
+        return result
+    }
+
     private func runReviewJob(_ job: ReviewJob) async -> ReviewResult {
         let cfg = currentConfig()
         // hub 已校验 repo，这里再防一手: 本机配置过, 或 autoRepos 下服务端受管即参与。
         guard cfg.participates(job.repo, managed: currentManagedRepos()) else {
-            return ReviewResult(exitCode: 1, logTail: "本机未配置且未自动参与 repo \(job.repo)")
+            return earlyExit(job, ReviewResult(exitCode: 1, logTail: "本机未配置且未自动参与 repo \(job.repo)"),
+                             "本机未配置且未自动参与 repo \(job.repo), 拒接")
         }
         let conf = cfg.resolveRepo(job.repo)
 
@@ -105,11 +120,10 @@ final class ReviewCoordinator {
         await QuotaMonitor.shared.refreshUsage(config: cfg)
         let q0 = QuotaMonitor.shared.current(config: cfg)
         if q0.ok == false {
-            LogStore.shared.log("派活前自查: Claude 额度不足(\(q0.reason ?? "?")), 拒接 PR #\(job.pr_num), 交服务端改派")
             var r = ReviewResult(exitCode: 0, logTail: "本机 Claude 额度不足(\(q0.reason ?? "")), 已拒接本单, 交由服务端改派给有额度的人")
             r.quota = q0
             r.declinedQuota = true
-            return r
+            return earlyExit(job, r, "派活前自查: Claude 额度不足(\(q0.reason ?? "?")), 拒接本单, 交服务端改派")
         }
 
         // mainRepo 尚不存在(自动模式的首个 job, 或手动配了路径但还没 clone)→ 先从远端自动 clone。
@@ -120,11 +134,13 @@ final class ReviewCoordinator {
         let cl = await RepoCloner.ensureRepoCloned(
             repo: job.repo, provider: job.provider, prUrl: job.pr_url, mainRepo: conf.mainRepo)
         guard cl.ok else {
-            return ReviewResult(exitCode: 1, logTail: String("仓库准备失败(自动 clone):\n\(cl.detail)".suffix(4000)))
+            return earlyExit(job, ReviewResult(exitCode: 1, logTail: String("仓库准备失败(自动 clone):\n\(cl.detail)".suffix(4000))),
+                             "仓库准备失败(自动 clone): " + LogStore.oneLine(cl.detail))
         }
 
         if cancelRequested {
-            return ReviewResult(exitCode: 130, logTail: "本次 Review 在准备阶段(clone)被手动终止")
+            return earlyExit(job, ReviewResult(exitCode: 130, logTail: "本次 Review 在准备阶段(clone)被手动终止"),
+                             "在准备阶段(clone)被手动终止")
         }
 
         sendMessage(.reviewProgress(jobId: job.job_id, stage: "worktree"))
@@ -134,10 +150,12 @@ final class ReviewCoordinator {
             prNum: job.pr_num, branch: job.branch, provider: job.provider
         )
         guard wt.ok else {
-            return ReviewResult(exitCode: 1, logTail: String("worktree 准备失败:\n\(wt.detail)".suffix(4000)))
+            return earlyExit(job, ReviewResult(exitCode: 1, logTail: String("worktree 准备失败:\n\(wt.detail)".suffix(4000))),
+                             "worktree 准备失败: " + LogStore.oneLine(wt.detail))
         }
         if cancelRequested {
-            return ReviewResult(exitCode: 130, logTail: "本次 Review 在准备阶段(worktree)被手动终止")
+            return earlyExit(job, ReviewResult(exitCode: 130, logTail: "本次 Review 在准备阶段(worktree)被手动终止"),
+                             "在准备阶段(worktree)被手动终止")
         }
 
         // 同 head 重复派单: 上一单还在跑时 hub 又派了本单(它当时看不到上一单的结论), 而上一单已经把这个
@@ -146,7 +164,6 @@ final class ReviewCoordinator {
         if let dup = dupGuard.duplicate(of: job, head: wt.head) {
             let url = dup.generalCommentUrl.isEmpty ? "无链接" : dup.generalCommentUrl
             let short = String(wt.head.prefix(8))
-            LogStore.shared.log("跳过重复 review: PR #\(job.pr_num) head \(short) 已由 job \(dup.jobId) 评审并提交(\(url))")
             var r = ReviewResult(
                 exitCode: 0,
                 logTail: "本单在 job \(dup.jobId) 运行期间派出, 而该单已对同一个 head \(short) 完成评审并提交 review"
@@ -155,7 +172,7 @@ final class ReviewCoordinator {
                 generalCommentUrl: dup.generalCommentUrl, inlineCount: dup.inlineCount,
                 quota: QuotaMonitor.shared.current(config: cfg))
             r.dedupedOf = dup.jobId
-            return r
+            return earlyExit(job, r, "跳过重复 review: head \(short) 已由 job \(dup.jobId) 评审并提交(\(url))", head: wt.head)
         }
 
         let ciStatus = ciStatusString(overall: job.ci_overall, failedNames: job.ci_failed_names)
