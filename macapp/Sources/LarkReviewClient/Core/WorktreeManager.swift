@@ -27,6 +27,18 @@ enum WorktreeManager {
             r = await ProcessRunner.run("git", ["-C", worktreePath, "reset", "--hard", "origin/\(branch)"])
             if r.code == 0 {
                 _ = await ProcessRunner.run("git", ["-C", worktreePath, "clean", "-fd"])
+            } else {
+                // 刷新失败多半是工作树本身坏了，最常见的是主仓 .git/worktrees/<name> admin 目录被
+                // 并发的 worktree remove/prune 清掉：目录还在但已不是 git 仓库 → reset 永远 fatal，
+                // 该 PR 每次重派都必然失败（2026-09-01 PR #916 实测，连续重派全挂在这里）。
+                // 删掉重建，别让一次损坏把这个 PR 永久卡死。
+                LogStore.shared.log("worktree 刷新失败, 删除后重建: " + LogStore.oneLine(r.stdout + r.stderr))
+                try? FileManager.default.removeItem(atPath: worktreePath)
+                _ = await ProcessRunner.run("git", ["-C", mainRepo, "worktree", "prune"])
+                r = await ProcessRunner.run("git", ["-C", mainRepo, "worktree", "add", worktreePath, branch])
+                if r.code != 0 {
+                    r = await ProcessRunner.run("git", ["-C", mainRepo, "worktree", "add", "--detach", worktreePath, "origin/\(branch)"])
+                }
             }
         } else {
             LogStore.shared.log("creating worktree \(worktreePath)")

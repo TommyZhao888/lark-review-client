@@ -23,6 +23,13 @@ final class LogStore: @unchecked Sendable {
 
     private func isoNow() -> String { isoFormatter.string(from: Date()) }
 
+    /// 多行 stdout/stderr 压成一行摘要，供运行日志单行记录（完整内容另进 review 日志）。
+    static func oneLine(_ s: String, max: Int = 300) -> String {
+        let t = s.split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return t.count > max ? String(t.prefix(max)) + "…" : t
+    }
+
     // ---------- 运行日志 ----------
 
     func log(_ message: String) {
