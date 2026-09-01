@@ -20,8 +20,12 @@
 - 主仓 `.git/worktrees/<name>` 的 admin 目录被并发的 `worktree remove` / `prune` 清掉后,
   工作树目录还在但**已不是 git 仓库** → `reset --hard` 永远 `fatal: not a git repository`,
   该 PR **每次重派都必然失败**,形成死循环(上面 PR #916 正是这么卡住的)。
-- 现在刷新失败会**删掉目录 + `worktree prune` + 重建**,等价于首次创建那条路径;azdo 的
-  `refs/pull/<id>/merge` 兜底照旧在后面接着兜。
+- 现在刷新失败会**删掉目录 + `worktree prune` + 重建**;azdo 的 `refs/pull/<id>/merge` 兜底
+  照旧在后面接着兜。
+- 建树(重建与首建)一律 `worktree add --detach origin/<branch>`,**不再检出本地分支**:本地分支
+  只靠工作树里那句 `reset --hard origin/<branch>` 推进,而重建的前提恰恰是那句挂了 ——
+  `worktree add <path> <branch>` 会**静默检出一个旧 commit 并返回成功**,拿旧代码跑完整 review
+  发到 PR,比响亮失败更糟(首建路径在 `removeWorktree` / 定期清理之后有同样的隐患)。
 
 ## v1.10.2 — 2026-08-19
 

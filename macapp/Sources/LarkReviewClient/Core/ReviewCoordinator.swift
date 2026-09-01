@@ -98,10 +98,10 @@ final class ReviewCoordinator {
     /// hub 的失败卡片会让成员「详见你本机日志」—— 任何一条静默的早退路径都会让那句话变成空头支票
     /// (2026-09-01 PR #916: worktree 的 admin 目录丢失, 连续两次派单在本机全程零日志, 原因只存在于
     /// 一条转瞬即逝的系统通知和发给 hub 的回执里)。model 记 "-" 表示本单没跑到 claude。
-    private func earlyExit(_ job: ReviewJob, _ result: ReviewResult, _ note: String) -> ReviewResult {
+    private func earlyExit(_ job: ReviewJob, _ result: ReviewResult, _ note: String, head: String = "") -> ReviewResult {
         LogStore.shared.log("PR #\(job.pr_num) \(note)")
         if let saved = LogStore.shared.writeReviewLog(job: job, model: "-", exitCode: Int32(result.exitCode),
-                                                      result: result, logText: result.logTail) {
+                                                      result: result, logText: result.logTail, head: head) {
             LogStore.shared.log("review 日志已存: \(saved)")
         }
         return result
@@ -172,7 +172,7 @@ final class ReviewCoordinator {
                 generalCommentUrl: dup.generalCommentUrl, inlineCount: dup.inlineCount,
                 quota: QuotaMonitor.shared.current(config: cfg))
             r.dedupedOf = dup.jobId
-            return earlyExit(job, r, "跳过重复 review: head \(short) 已由 job \(dup.jobId) 评审并提交(\(url))")
+            return earlyExit(job, r, "跳过重复 review: head \(short) 已由 job \(dup.jobId) 评审并提交(\(url))", head: wt.head)
         }
 
         let ciStatus = ciStatusString(overall: job.ci_overall, failedNames: job.ci_failed_names)

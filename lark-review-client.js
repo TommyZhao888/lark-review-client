@@ -807,6 +807,9 @@ function run(cmd, args, opts = {}) {
 }
 
 // ---------- worktree 管理（复刻 worker.sh STAGE 6）----------
+// 建树一律 `worktree add --detach origin/<branch>`, 不用本地分支: 本地分支只靠工作树里那句
+// `reset --hard origin/<branch>` 推进, 而重建的前提正是那句挂了 → `add <path> <branch>` 会静默
+// 检出一个旧 commit 并返回成功, 拿旧代码跑完整 review 发到 PR(比响亮失败更糟)。
 async function ensureWorktree(mainRepo, worktreeBase, prNum, branch, provider) {
   const worktreePath = path.join(worktreeBase, `pr-${prNum}`);
   const env = { ...process.env, GIT_LFS_SKIP_SMUDGE: '1' };
@@ -826,18 +829,12 @@ async function ensureWorktree(mainRepo, worktreeBase, prNum, branch, provider) {
       log(`worktree 刷新失败, 删除后重建: ${oneLine((r.stdout || '') + (r.stderr || ''))}`);
       try { fs.rmSync(worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
       await run('git', ['-C', mainRepo, 'worktree', 'prune'], { env });
-      r = await run('git', ['-C', mainRepo, 'worktree', 'add', worktreePath, branch], { env });
-      if (r.code !== 0) {
-        r = await run('git', ['-C', mainRepo, 'worktree', 'add', '--detach', worktreePath, `origin/${branch}`], { env });
-      }
+      r = await run('git', ['-C', mainRepo, 'worktree', 'add', '--detach', worktreePath, `origin/${branch}`], { env });
     }
   } else {
     log(`creating worktree ${worktreePath}`);
     await run('git', ['-C', mainRepo, 'fetch', 'origin', branch], { env });
-    r = await run('git', ['-C', mainRepo, 'worktree', 'add', worktreePath, branch], { env });
-    if (r.code !== 0) {
-      r = await run('git', ['-C', mainRepo, 'worktree', 'add', '--detach', worktreePath, `origin/${branch}`], { env });
-    }
+    r = await run('git', ['-C', mainRepo, 'worktree', 'add', '--detach', worktreePath, `origin/${branch}`], { env });
   }
   // Azure DevOps 兜底: 按源分支名 fetch 失败(分支名带特殊字符/权限差异)时,
   // 改用 ADO 发布的 PR 合并引用 refs/pull/<id>/merge(等价 GitHub 的 pull/N/merge)。
@@ -906,9 +903,9 @@ function parseResult(logText) {
 // 出口: 写一行运行日志 + 照常落一份 review 日志。hub 的失败卡片会让成员「详见你本机日志」——
 // 任何一条静默的早退路径都会让那句话变成空头支票(2026-09-01 PR #916: worktree 的 admin 目录
 // 丢失, 连续两次派单在本机全程零日志, 原因只存在于发给 hub 的回执里)。
-function earlyExit(job, result, note) {
+function earlyExit(job, result, note, head = '') {
   log(`PR #${job.pr_num} ${note}`);
-  const saved = writeReviewLog(job, result.exit_code, result, result.log_tail, result.usage || null, '', '-');
+  const saved = writeReviewLog(job, result.exit_code, result, result.log_tail, result.usage || null, head, '-');
   if (saved) log(`review 日志已存: ${saved}`);
   return result;
 }
@@ -956,7 +953,7 @@ async function runReviewJob(job) {
       inline_count: dup.inline_count, result_line: dup.result_line, quota: currentQuota(), deduped_of: dup.job_id,
       log_tail: `本单在 job ${dup.job_id} 运行期间派出, 而该单已对同一个 head ${wt.head.slice(0, 8)} 完成评审并提交 review`
         + `(${dup.general_comment_url || '无链接'}, 结论 ${dup.verdict})。head 未变, 本机跳过重复评审, 结论沿用上一单。` },
-      `跳过重复 review: head ${wt.head.slice(0, 8)} 已由 job ${dup.job_id} 评审并提交(${dup.general_comment_url || '无链接'})`);
+      `跳过重复 review: head ${wt.head.slice(0, 8)} 已由 job ${dup.job_id} 评审并提交(${dup.general_comment_url || '无链接'})`, wt.head);
   }
 
   const ciStatus = job.ci_failed_names

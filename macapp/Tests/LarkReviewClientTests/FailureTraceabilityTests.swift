@@ -94,12 +94,44 @@ final class WorktreeSelfHealTests: XCTestCase {
             mainRepo: main, worktreeBase: wtBase, prNum: 1, branch: branch, provider: nil)
         XCTAssertTrue(first.ok, "前置条件: 首次应能建出 worktree — \(first.detail)")
 
+        // 远端把该分支推进一格: 重建必须落在这个新 commit 上, 而不是本地分支停着的旧 commit。
+        let newHead = try await advanceRemoteBranch(main: main, branch: branch)
+
         // 模拟并发 prune：admin 目录没了，工作树目录还在 → 已不是 git 仓库。
         try FileManager.default.removeItem(atPath: main + "/.git/worktrees/pr-1")
 
         let second = await WorktreeManager.ensureWorktree(
             mainRepo: main, worktreeBase: wtBase, prNum: 1, branch: branch, provider: nil)
         XCTAssertTrue(second.ok, "admin 目录丢失后应删掉重建, 而不是让该 PR 永久卡死 — \(second.detail)")
-        XCTAssertFalse(second.head.isEmpty, "重建后要能读出 head, 供同 head 去重与日志头标注")
+        XCTAssertEqual(second.head, newHead,
+                       "重建要落在 origin/\(branch) 上; 检出本地分支会静默拿旧代码跑完整 review 并发到 PR")
+    }
+
+    /// 首建路径同样不能用本地分支: removeWorktree/pruneStaleWorktrees 删目录 + prune 后本地分支
+    /// 还在且停在旧 commit, 下次派单会静默检出旧代码。
+    func testFreshWorktreeChecksOutRemoteHeadNotStaleLocalBranch() async throws {
+        let (main, wtBase, branch) = try await makeRepo()
+        let first = await WorktreeManager.ensureWorktree(
+            mainRepo: main, worktreeBase: wtBase, prNum: 2, branch: branch, provider: nil)
+        XCTAssertTrue(first.ok, "前置条件: 首次应能建出 worktree — \(first.detail)")
+
+        let newHead = try await advanceRemoteBranch(main: main, branch: branch)
+        await WorktreeManager.removeWorktree(mainRepo: main, worktreeBase: wtBase, prNum: 2)
+
+        let again = await WorktreeManager.ensureWorktree(
+            mainRepo: main, worktreeBase: wtBase, prNum: 2, branch: branch, provider: nil)
+        XCTAssertTrue(again.ok, "worktree 被清掉后应能重新建出 — \(again.detail)")
+        XCTAssertEqual(again.head, newHead, "首建也要以 origin/\(branch) 为准, 本地分支可能停在旧 commit")
+    }
+
+    /// 用另一份 clone 把 origin 上的分支推进一格, 返回新 head(主仓不 fetch, 保持本地分支过期)。
+    private func advanceRemoteBranch(main: String, branch: String) async throws -> String {
+        let side = root + "/side"
+        await git(["clone", "--branch", branch, root + "/origin.git", side])
+        try "bye".write(toFile: side + "/f.txt", atomically: true, encoding: .utf8)
+        await git(["-C", side, "commit", "-am", "advance"])
+        await git(["-C", side, "push", "origin", branch])
+        let h = await git(["-C", side, "rev-parse", "HEAD"])
+        return h.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
