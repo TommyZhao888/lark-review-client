@@ -142,4 +142,31 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.effectiveQuotaClaudePath, "/Users/x/.local/bin/claude")
         XCTAssertEqual(reloaded.claudePath, "/opt/engines/omp-adapter.sh", "review 仍走 claudePath")
     }
+
+    // ---- v1.10.4: 「空闲时自动更新」默认改为开 + 一次性迁移 ----
+
+    /// 全新机器(无配置文件): 直接拿到新默认值 = 开。
+    func testAutoUpdateDefaultsOnForFreshInstall() {
+        XCTAssertTrue(ConfigStore.load().autoUpdate)
+    }
+
+    /// 老配置(存着 false, 无迁移标记): 一次性强制打开 —— 那个 false 只是旧默认值的残留。
+    func testAutoUpdateMigratesLegacyFalseToOn() throws {
+        try #"{"autoUpdate": false}"#.write(toFile: tmpConfig, atomically: true, encoding: .utf8)
+        XCTAssertTrue(ConfigStore.load().autoUpdate, "无迁移标记的 false 必须被翻成 true")
+    }
+
+    /// 迁移后用户主动关掉并保存: 标记已在, 不得再被翻回来。
+    func testAutoUpdateRespectsExplicitOptOutAfterMigration() throws {
+        var cfg = ConfigStore.load()
+        cfg.autoUpdate = false
+        try ConfigStore.save(cfg)
+
+        let obj = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: tmpConfig))) as! [String: Any]
+        XCTAssertEqual(obj["autoUpdateDefaulted"] as? Bool, true, "save 必须落下迁移标记")
+        XCTAssertEqual(obj["autoUpdate"] as? Bool, false)
+
+        XCTAssertFalse(ConfigStore.load().autoUpdate, "用户主动关掉后不得被迁移再次打开")
+    }
 }

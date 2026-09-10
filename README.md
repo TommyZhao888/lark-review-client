@@ -32,7 +32,7 @@ brew install --cask lark-review-client
 
 **升级**：app 自带自更新——有新版本时菜单栏显示 🆙，点 **「更新并重启」** 自动从
 [Releases](https://github.com/TommyZhao888/lark-review-client/releases) 下载新版原地替换并重启；
-设置里可开 **「空闲时自动更新」**。任意安装位置均可用，无需碰 brew。
+**「空闲时自动更新」默认开启**（设置里可关）。任意安装位置均可用，无需碰 brew。
 （brew 侧对齐版本号用 `brew upgrade --cask --greedy-auto-updates lark-review-client`；
 app 自更新后 `brew list --cask --versions` 显示滞后属正常，不影响使用。）
 

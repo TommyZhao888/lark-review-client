@@ -198,7 +198,11 @@ final class ReviewCoordinator {
         // 末尾 result 事件带最终文本+用量(与 json 信封同字段, 复用 parseClaudeEnvelope)。
         // 老版 claude 不支持 → 本次拿不到 result 事件, 回退 --output-format json 重跑并记住(能力探测)。
         let useStream = (streamJsonSupported != false)
+        // --strict-mcp-config: 只认 --mcp-config 指定的 MCP(这里一个都不给 = 全禁)。review 子进程不需要
+        // 任何 MCP 工具(/pr-review 走 gh CLI; 全局 CLAUDE.md 里的 CodeGraph 有 `codegraph explore` shell 兜底),
+        // 而 MCP 工具定义每轮都要进上下文。本机实测每轮省约 2100 token, 按单次 review 15 轮算省约 3.5% 额度。
         let baseArgs = ["--print", "--model", model, "--dangerously-skip-permissions",
+                        "--strict-mcp-config",
                         "--add-dir", conf.mainRepo, "--add-dir", conf.worktreeBase]
         let streamArgs = ["--output-format", "stream-json", "--verbose"] + baseArgs
         let jsonArgs = ["--output-format", "json"] + baseArgs

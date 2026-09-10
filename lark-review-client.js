@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json / package-lock.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.10.3';
+const CLIENT_VERSION = '1.10.4';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -976,7 +976,11 @@ async function runReviewJob(job) {
   // 优先 stream-json --verbose: 边跑边把 claude 的工具调用/文字喂进运行日志(实时可见); 末尾 result
   // 事件带最终文本+用量(与 json 信封同字段, 复用 parseClaudeEnvelope)。老版不支持 → 本次拿不到 result
   // 事件, 回退 --output-format json 重跑并记住(能力探测, stream 参数校验失败几乎不耗 token)。
+  // --strict-mcp-config: 只认 --mcp-config 指定的 MCP(这里一个都不给 = 全禁)。review 子进程不需要
+  // 任何 MCP 工具(/pr-review 走 gh CLI; 全局 CLAUDE.md 里的 CodeGraph 有 `codegraph explore` shell 兜底),
+  // 而 MCP 工具定义每轮都要进上下文。本机实测每轮省约 2100 token, 按单次 review 15 轮算省约 3.5% 额度。
   const baseArgs = ['--print', '--model', model, '--dangerously-skip-permissions',
+    '--strict-mcp-config',
     '--add-dir', conf.mainRepo, '--add-dir', conf.worktreeBase];
   const streamArgs = ['--output-format', 'stream-json', '--verbose', ...baseArgs];
   const jsonArgs = ['--output-format', 'json', ...baseArgs];

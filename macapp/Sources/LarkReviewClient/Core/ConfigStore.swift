@@ -33,6 +33,10 @@ enum ConfigStore {
         if let n = obj["notify"] as? Bool { cfg.notify = n }
         if let s = obj["notifySound"] as? String { cfg.notifySound = s }
         if let a = obj["autoUpdate"] as? Bool { cfg.autoUpdate = a }
+        // v1.10.4: 「空闲时自动更新」默认由关改为开。老配置里存着的 false 无法区分「主动关掉」和
+        // 「从没碰过」(此前默认就是关, 且开关埋在设置页第二个 tab), 故在没有迁移标记时一次性强制
+        // 打开。标记由 save 写入 —— 用户之后自己关掉并保存, 标记已在, 就不会再被翻回来。
+        if obj["autoUpdateDefaulted"] as? Bool != true { cfg.autoUpdate = true }
         if let ar = obj["autoRepos"] as? Bool { cfg.autoRepos = ar }
         if let rb = obj["repoBaseDir"] as? String,
            !rb.trimmingCharacters(in: .whitespaces).isEmpty { cfg.repoBaseDir = rb }
@@ -79,6 +83,7 @@ enum ConfigStore {
         cur["reviewTimeoutMs"] = cfg.reviewTimeoutMs >= 0 ? cfg.reviewTimeoutMs : 1800000
         cur["notify"] = cfg.notify
         cur["autoUpdate"] = cfg.autoUpdate
+        cur["autoUpdateDefaulted"] = true   // 迁移标记: 写过一次后, load 不再强制打开 autoUpdate
         cur["autoRepos"] = cfg.autoRepos
         let baseDir = cfg.repoBaseDir.trimmingCharacters(in: .whitespaces)
         cur["repoBaseDir"] = baseDir.isEmpty ? NSHomeDirectory() + "/LarkReviewRepos" : baseDir

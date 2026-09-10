@@ -1,7 +1,7 @@
 import Foundation
 
 /// 客户端版本：升级功能时手动 +1（与 Info.plist 保持一致）。服务端据此判断是否提示升级。
-let CLIENT_VERSION = "1.10.3"
+let CLIENT_VERSION = "1.10.4"
 
 /// 单个 repo 的本机配置（~/.lark-review-client.json 的 repos["owner/repo"]）。
 /// v1.7 起路径均可留空 = 自动模式（clone 到 repoBaseDir/<owner-repo>）。
@@ -44,8 +44,9 @@ struct Config: Equatable {
     var reviewTimeoutMs: Int = 1800000
     var notify: Bool = true
     var notifySound: String = ""
-    /// 空闲(无在跑/排队 review)且连上时, 检测到新版本自动更新(下载 Releases dmg 原地替换 + 重启)。默认关。
-    var autoUpdate: Bool = false
+    /// 空闲(无在跑/排队 review)且连上时, 检测到新版本自动更新(下载 Releases dmg 原地替换 + 重启)。
+    /// v1.10.4 起默认开(此前默认关) — 见 ConfigStore.load 的 autoUpdateDefaulted 一次性迁移。
+    var autoUpdate: Bool = true
 
     // ---- v1.7: 项目自动参与 + 自动 clone + 提示词两级 ----
     /// 自动参与服务端下发的全部受管项目(路径留空的项目首次派单时自动 clone)。false = 只参与 repos 里配置的。

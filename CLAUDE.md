@@ -65,4 +65,4 @@
 - 服务端 / 部署 / 派单逻辑在 `LarkBot` 仓库（其 CLAUDE.md 有对应约定）。
 - 客户端自更新（macapp）：菜单栏「更新并重启」= 从 GitHub Releases 下载推荐版本 dmg →
   校验（bundle id/版本/架构/签名）→ 原地替换自己 → 重启，**任意安装位置可用**；
-  设置里可开「空闲时自动更新」。见 `macapp/README.md`。
+  「空闲时自动更新」自 v1.10.4 起**默认开启**（设置里可关）。见 `macapp/README.md`。
