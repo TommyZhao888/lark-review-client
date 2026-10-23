@@ -12,6 +12,26 @@ final class AppRuntime {
     let reviews = ReviewCoordinator()
     let notifications = NotificationManager()
     let outbox = ResultOutbox()
+    private var announceStore = AnnouncementStore()
+
+    /// 收到服务端公告: 进面板横幅; 首次见到 → 弹系统通知(点开看全文), 系统通知不可用则直接弹详情窗口。
+    private func receiveAnnouncement(_ a: Announcement) {
+        guard !a.id.isEmpty, !a.title.isEmpty else { return }
+        if !state.announcements.contains(where: { $0.id == a.id }) { state.announcements.append(a) }
+        guard announceStore.markSeen(a.id) else { return }
+        LogStore.shared.log("📢 服务端公告: \(a.title) —— \(a.message.replacingOccurrences(of: "\n", with: " ").prefix(200))")
+        if !notifications.notifyAnnouncement(a) { showAnnouncement(a) }
+    }
+
+    /// 打开公告详情窗口(通知点击 / 面板横幅 都走这里); 点「知道了」记为已读。
+    func showAnnouncement(_ a: Announcement) {
+        AnnouncementWindow.show(a) { [weak self] in self?.dismissAnnouncement(a.id) }
+    }
+
+    func dismissAnnouncement(_ id: String) {
+        announceStore.dismiss(id)
+        state.dismissedAnnouncementIds = Set(announceStore.dismissed)
+    }
 
     /// 服务端受管清单本地缓存(重启/重连后首次 register 就带上完整自动参与列表; 与 Node 同一文件)。
     private var managedCachePath: String { ConfigStore.configPath + ".managed-cache.json" }
@@ -53,7 +73,12 @@ final class AppRuntime {
             LogStore.shared.log("⚠️ 消息 \(type) 解码失败(已丢弃): \(error)")
         }
         notifications.currentConfig = { [state] in state.config }
+        notifications.onAnnouncementClicked = { [weak self] id in
+            guard let self, let a = self.state.announcements.first(where: { $0.id == id }) else { return }
+            self.showAnnouncement(a)
+        }
         notifications.requestAuthorization()
+        state.dismissedAnnouncementIds = Set(announceStore.dismissed)
 
         wireWebSocket()
         wireReviews()
@@ -181,6 +206,17 @@ final class AppRuntime {
                 recommendedVersion: ack.recommended_version
             )
             state.upgrade = ack.upgrade
+            // 每次注册都按 ack 重置: 连到不下发模型的旧 hub → 退回本机配置可改。
+            let srvModel = ack.review_model?.trimmingCharacters(in: .whitespacesAndNewlines)
+            state.serverReviewModel = (srvModel?.isEmpty == false) ? srvModel : nil
+            if let m = state.serverReviewModel {
+                LogStore.shared.log("review 模型由服务端统一下发: \(m)(本机配置 \(state.config.reviewModel) 暂不生效)")
+            }
+            // 有效期内的公告随 ack 补发: 以 ack 为准重置列表(撤回/过期的随之消失), 新的才弹。
+            if let anns = ack.announcements {
+                state.announcements = []
+                anns.forEach { self.receiveAnnouncement($0) }
+            }
             if let repos = ack.managed_repos {
                 state.managedRepos = repos
                 self.saveManagedCache(repos)
@@ -233,6 +269,12 @@ final class AppRuntime {
                 }
             }
         }
+
+        ws.onReviewModelUpdated = { [state] model in
+            state.serverReviewModel = model
+        }
+
+        ws.onAnnouncement = { [weak self] a in self?.receiveAnnouncement(a) }
 
         ws.onReposUpdated = { [self, state, ws] repos in
             state.managedRepos = repos

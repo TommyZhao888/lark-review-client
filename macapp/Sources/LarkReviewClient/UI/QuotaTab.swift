@@ -137,7 +137,11 @@ struct QuotaTab: View {
 
     private var modelSection: some View {
         Section("模型") {
-            LabeledContent("review 模型（本机配置）", value: dash(state.config.reviewModel))
+            if let srv = state.serverReviewModel {
+                LabeledContent("review 模型（服务端下发）", value: srv)
+            } else {
+                LabeledContent("review 模型（本机配置）", value: dash(state.config.reviewModel))
+            }
             LabeledContent("最近一次 review 实际模型", value: lastReview.map { lr in
                 lr.model + (lr.ts.map { " · " + fmt($0) } ?? "")
                     + (lr.repo.isEmpty ? "" : " · \(lr.repo) #\(lr.prNum)")
@@ -148,7 +152,7 @@ struct QuotaTab: View {
                     ? "" : " · 查额度用: \(state.config.effectiveQuotaClaudePath)"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("服务端派单时可用 review_model 覆盖本机配置，故两者可能不同。")
+            Text("服务端下发模型时以服务端为准(本机配置不生效); 连到未下发模型的旧服务端时才用本机配置。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

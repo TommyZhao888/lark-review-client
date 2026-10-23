@@ -12,6 +12,8 @@ final class WebSocketClient: NSObject {
     // 事件回调（AppRuntime 接线）
     var onRegisterAck: ((RegisterAck, _ wasReconnect: Bool) -> Void)?
     var onReposUpdated: (([ManagedRepo]) -> Void)?
+    var onReviewModelUpdated: ((String) -> Void)?
+    var onAnnouncement: ((Announcement) -> Void)?
     var onRegisterReject: ((String) -> Void)?
     var onReviewJob: ((ReviewJob) -> Void)?
     var onPrClosed: ((PrClosed) -> Void)?
@@ -249,6 +251,15 @@ final class WebSocketClient: NSObject {
                 LogStore.shared.log("服务端受管 repo 清单已更新: [\(repos.map(\.repo).joined(separator: ", "))]")
                 onReposUpdated?(repos)
             }
+
+        case .reviewModelUpdated(let upd):
+            if let m = upd.review_model?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty {
+                LogStore.shared.log("服务端 review 模型已切换为: \(m)")
+                onReviewModelUpdated?(m)
+            }
+
+        case .announcement(let a):
+            onAnnouncement?(a)
 
         case .registerReject(let rej):
             // 不退出：停止自动重连，等用户在设置里改 token（对齐 Node，避免鸡生蛋）。

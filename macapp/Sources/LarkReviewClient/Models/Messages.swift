@@ -113,6 +113,42 @@ struct RegisterAck: Codable {
     var recommended_version: String?
     var upgrade: UpgradeInfo?
     var managed_repos: [ManagedRepo]?
+    /// 服务端统一下发的 review 模型(hub 派单也强制用它)。旧 hub 不带 → nil(本机配置可改)。
+    var review_model: String?
+    /// 仍在有效期内的服务端公告(离线时发的上线补拿); 客户端按 id 去重, 同一条只弹一次。
+    var announcements: [Announcement]?
+}
+
+/// 服务端公告(hub 管理页下发): 实时推送 type=announcement, 或随 register_ack 补发。
+struct Announcement: Codable, Equatable, Identifiable {
+    var id: String
+    var title: String
+    var message: String
+    var level: String?         // "important" | "info"
+    var ts: String?
+    var expires_at: String?
+
+    var isImportant: Bool { level == "important" }
+    var isExpired: Bool {
+        guard let e = expires_at, let d = ISO8601DateFormatter.lenient(e) else { return false }
+        return d <= Date()
+    }
+}
+
+extension ISO8601DateFormatter {
+    /// 兼容带/不带毫秒的 ISO8601(hub 用 toISOString, 带毫秒)。
+    static func lenient(_ s: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: s) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: s)
+    }
+}
+
+/// 管理员在 hub 切换 review 模型后实时推送。
+struct ReviewModelUpdated: Codable {
+    var review_model: String?
 }
 
 struct ReposUpdated: Codable {
@@ -186,6 +222,8 @@ extension PrClosed {
 enum InboundMessage {
     case registerAck(RegisterAck)
     case reposUpdated(ReposUpdated)
+    case reviewModelUpdated(ReviewModelUpdated)
+    case announcement(Announcement)
     case registerReject(RegisterReject)
     case reviewJob(ReviewJob)
     case prClosed(PrClosed)
@@ -212,6 +250,8 @@ enum InboundMessage {
         switch type {
         case "register_ack":    return decode(RegisterAck.self) { .registerAck($0) }
         case "repos_updated":   return decode(ReposUpdated.self) { .reposUpdated($0) }
+        case "review_model_updated": return decode(ReviewModelUpdated.self) { .reviewModelUpdated($0) }
+        case "announcement":    return decode(Announcement.self) { .announcement($0) }
         case "register_reject": return decode(RegisterReject.self) { .registerReject($0) }
         case "review_job":      return decode(ReviewJob.self) { .reviewJob($0) }
         case "pr_closed":       return decode(PrClosed.self) { .prClosed($0) }

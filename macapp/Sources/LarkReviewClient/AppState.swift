@@ -38,6 +38,15 @@ final class AppState {
 
     var connection: ConnectionState = .disconnected
     var identity: Identity?                 // 服务端下发，只读展示，绝不本地持久化
+    /// 服务端统一下发的 review 模型(register_ack / review_model_updated)。非 nil → 设置页只读显示它;
+    /// nil(旧 hub 未下发 / 尚未注册)→ 本机配置可改。只读展示，不本地持久化。
+    var serverReviewModel: String?
+    /// 当前有效的服务端公告(最近一次 ack 下发 + 之后推送的); 点过「知道了」的不在面板横幅显示。
+    var announcements: [Announcement] = []
+    var dismissedAnnouncementIds: Set<String> = []
+    var visibleAnnouncements: [Announcement] {
+        announcements.filter { !dismissedAnnouncementIds.contains($0.id) && !$0.isExpired }
+    }
     var upgrade: UpgradeInfo?
     var updatePhase: UpdatePhase = .idle
     var managedRepos: [ManagedRepo] = []

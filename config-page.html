@@ -61,6 +61,7 @@
   <button id="tab-btn-quota" class="tab" onclick="showTab('quota')">额度</button>
 </div>
 <main>
+ <div id="annBox"></div>
  <div id="tab-config">
   <div class="card">
     <h2>身份(由服务端分配,不可改)</h2>
@@ -99,7 +100,7 @@
     <h2>本机环境</h2>
     <div class="two">
       <div><label>claude 路径</label><input id="claudePath" class="mono" placeholder="claude 或绝对路径"></div>
-      <div><label>review 模型</label><input id="reviewModel" class="mono" placeholder="claude-opus-4-8"></div>
+      <div><label>review 模型 <span class="muted" id="reviewModelSrc"></span></label><input id="reviewModel" class="mono" placeholder="claude-opus-4-8"></div>
     </div>
     <div class="two">
       <div><label>worktree 最长保留天数</label><input id="worktreeMaxAgeDays" type="number" placeholder="14"></div>
@@ -185,12 +186,12 @@
   <div class="card">
     <h2>模型</h2>
     <div class="idrow">
-      <div><span>review 模型(本机配置)</span><b class="mono" id="qModel">—</b></div>
+      <div><span id="qModelLabel">review 模型</span><b class="mono" id="qModel">—</b></div>
       <div><span>最近一次 review 实际模型</span><b class="mono" id="qLastModel">—</b></div>
       <div><span>claude 版本</span><b class="mono" id="qVer">—</b></div>
     </div>
     <div class="muted" id="qPaths" style="margin-top:8px"></div>
-    <div class="muted" style="margin-top:4px">服务端派单时可用 <code>review_model</code> 覆盖本机配置, 故两者可能不同。</div>
+    <div class="muted" style="margin-top:4px">服务端下发模型时以服务端为准(本机配置不生效); 连到未下发模型的旧服务端时才用本机配置。</div>
   </div>
 
   <div class="card">
@@ -303,7 +304,13 @@ async function reloadRepos(){
 async function load(){
   const c = await fetch('/config').then(r=>r.json());
   $('serverUrl').value=c.serverUrl||''; $('token').value=c.token||'';
-  $('claudePath').value=c.claudePath||''; $('reviewModel').value=c.reviewModel||'';
+  $('claudePath').value=c.claudePath||'';
+  // 服务端下发了模型 → 只读显示服务端值(派单也强制用它); 未下发 → 本机配置可改。
+  const srvModel = c.serverReviewModel || '';
+  $('reviewModel').value = srvModel || c.reviewModel || '';
+  $('reviewModel').readOnly = !!srvModel;
+  $('reviewModel').title = srvModel ? '由服务端统一下发, 本机不可改(服务端未下发时才可修改)' : '';
+  $('reviewModelSrc').textContent = srvModel ? '(由服务端统一下发, 不可修改)' : '';
   $('worktreeMaxAgeDays').value=c.worktreeMaxAgeDays||''; $('heartbeatMs').value=c.heartbeatMs||'';
   $('reviewTimeoutMin').value=(typeof c.reviewTimeoutMs==='number')?Math.round(c.reviewTimeoutMs/60000):30;
   $('repoBaseDir').value=c.repoBaseDir||''; $('globalPrompt').value=c.globalPrompt||'';
@@ -314,12 +321,25 @@ async function load(){
   renderRepos(c.managedRepos||[], c.repos||{}, false);
   refreshStatus();
 }
+// 服务端公告横幅: 显示完整正文, 点「知道了」后不再显示(客户端本机记住)。
+function renderAnnouncements(list){
+  $('annBox').innerHTML = list.map(a=>`<div class="card" style="border-color:${a.level==='important'?'var(--err)':'var(--acc)'}">
+    <h2>📢 服务端公告${a.level==='important'?' · <span class="err">重要</span>':''} <span class="muted" style="text-transform:none">${esc(a.ts?new Date(a.ts).toLocaleString('zh-CN',{hour12:false}):'')}</span></h2>
+    <div style="font-weight:600;margin-bottom:6px">${esc(a.title)}</div>
+    <div style="white-space:pre-wrap">${esc(a.message)}</div>
+    <div style="margin-top:10px"><button class="sm" onclick="dismissAnn('${esc(a.id)}')">知道了</button></div>
+  </div>`).join('');
+}
+async function dismissAnn(id){
+  try { await fetch('/announcement/dismiss',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}); refreshStatus(); } catch(e){}
+}
 async function refreshStatus(){
   try { const s = await fetch('/status').then(r=>r.json());
     $('ver').textContent = 'client v'+(s.client_version||'?');
     $('conn').innerHTML = (s.connected?'<span class="dot on"></span>已连接':'<span class="dot off"></span>未连接')
       + (s.registered?' · 已注册':'');
     $('iName').textContent = s.name||'—'; $('iOid').textContent = s.open_id||'—';
+    renderAnnouncements(s.announcements||[]);
     if (s.usage && s.usage.total && s.usage.total.reviews) {
       const f=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n||0);
       const t=s.usage.today, a=s.usage.total;
@@ -512,6 +532,7 @@ function renderQuota(q){
   $('qNote').textContent = '客户端每 '+Math.round(Number(q.poll_ms||600000)/60000)+' 分钟用 `claude -p /usage` 自动查一次(headless, 零 token), 派单前还会再查一次; '
     + '任一窗超过阈值即上报额度不足, 服务端改派他人, 到重置时间自动恢复。';
   $('qModel').textContent = q.review_model || '—';
+  $('qModelLabel').textContent = q.review_model_source==='server' ? 'review 模型(服务端下发)' : 'review 模型(本机配置)';
   const lr = q.last_review;
   $('qLastModel').textContent = lr
     ? (lr.model + (lr.ts ? ' · '+new Date(lr.ts).toLocaleString('zh-CN',{hour12:false}) : '') + (lr.repo ? ' · '+lr.repo+' #'+lr.pr_num : ''))

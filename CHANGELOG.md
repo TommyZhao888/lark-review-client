@@ -1,5 +1,26 @@
 # 更新说明
 
+## v1.11.0 — 2026-10-23
+
+> 三件事:**review 模型改由服务端统一下发并只读显示**、**AI review 评论带固定标记**、**服务端公告**。
+> 均需服务端 LarkBot `e6c646e` / `7118a8f` 及以上;连旧服务端时行为与 v1.10.4 一致。Node 与 macapp 两边对等。
+
+- **review 模型以服务端为准**:hub 在 `register_ack` 里下发当前模型,管理页切换后推
+  `review_model_updated`。收到后设置页「review 模型」改为**只读**显示服务端值(额度页同步显示来源);
+  此时保存配置不会改写本机 `reviewModel`。服务端未下发(旧 hub / 尚未注册)时仍可在本机修改。
+  派单时本就以 `job.review_model` 优先,实际执行模型不变。
+- **AI review 标记**:提示词末尾追加一段(append-only,不改原有 review 要求),让 General Comment
+  最后一行带 `— 🤖 AI Review · LarkBot 自动派单 · job <id>`,在 ADO / GitHub 上一眼区分 AI 自动
+  review 与本人手动 review。标记只给人看:服务端统计自动/手动以 client 回报的完成记录为准。
+- **服务端公告**:hub 管理页下发的公告(升级提醒、公共配置说明等)
+  - macapp:弹系统通知,**点击通知打开公告详情窗口**看完整正文(可滚动/复制);菜单栏面板顶部
+    显示横幅,点击同样打开详情;未授予通知权限时直接弹出详情窗口。
+  - Node 版:osascript 通知无法响应点击,故收到即弹**对话框**显示完整正文
+    (「知道了」/「打开配置页」),配置页顶部横幅也可查看。
+  - 同一条只弹一次(重连/重启不重复);已读状态存 `~/.lark-review-client.json.announcements.json`,
+    两种形态共用。
+- 开发:`macapp/test/mock-hub.js` 新增 `model [name]`、`announce <title> [message]`、`unannounce` 命令。
+
 ## v1.10.4 — 2026-09-10
 
 > 两件事:**review 少烧一点额度**,以及**「空闲时自动更新」默认开启**。

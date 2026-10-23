@@ -37,7 +37,7 @@ function detectHostname() {
 }
 
 // 客户端版本：升级功能时手动 +1（与 package.json / package-lock.json 保持一致）。服务端据此判断是否提示升级。
-const CLIENT_VERSION = '1.10.4';
+const CLIENT_VERSION = '1.11.0';
 
 // ---------- config ----------
 const CONFIG_PATH = process.argv[2]
@@ -464,7 +464,8 @@ async function quotaSnapshot(force = false) {
     last_error: usageLastError,
     plan: acct.plan, plan_error: acct.plan_error,
     claude: { version: acct.version, path: cfg.claudePath, quota_path: cfg.quotaClaudePath },
-    review_model: cfg.reviewModel,
+    review_model: serverReviewModel || cfg.reviewModel,
+    review_model_source: serverReviewModel ? 'server' : 'local',
     last_review: lastReviewInfo(),
     raw: usageRawText,
   };
@@ -516,6 +517,66 @@ function notify(title, message) {
     const c = spawn('osascript', ['-e', `display notification "${esc(message)}" with title "${esc(title)}"${sound}`], { stdio: 'ignore' });
     c.on('error', () => {}); c.unref();
   } catch { /* ignore */ }
+}
+
+// ---------- 服务端公告(hub 管理页下发): 弹对话框看全文 + 配置页横幅 ----------
+// osascript 的系统通知点了只会打开「脚本编辑器」(系统不把点击回传给程序), 看不到全文 ——
+// 所以 Node 版收到新公告直接弹对话框(标题 + 完整正文), 「打开配置页」可在页面顶部横幅再看。
+// seen = 已弹过(重连/重启不再弹); dismissed = 点过「知道了」(配置页横幅不再显示)。存本机, 只留最近 200 条。
+const ANNOUNCE_STATE_FILE = CONFIG_PATH + '.announcements.json';
+function loadAnnounceState() {
+  try { const j = JSON.parse(fs.readFileSync(ANNOUNCE_STATE_FILE, 'utf8'));
+    return { seen: Array.isArray(j.seen) ? j.seen : [], dismissed: Array.isArray(j.dismissed) ? j.dismissed : [] };
+  } catch { return { seen: [], dismissed: [] }; }
+}
+function saveAnnounceState(st) {
+  try {
+    const tmp = ANNOUNCE_STATE_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ seen: st.seen.slice(-200), dismissed: st.dismissed.slice(-200) }));
+    fs.renameSync(tmp, ANNOUNCE_STATE_FILE);
+  } catch (e) { logErr('saveAnnounceState:', e.message); }
+}
+let announceState = loadAnnounceState();
+let announcements = [];   // 当前有效公告(最近一次 ack 下发 + 之后推送的), 供配置页横幅
+function dismissAnnouncement(id) {
+  if (id && !announceState.dismissed.includes(id)) { announceState.dismissed.push(id); saveAnnounceState(announceState); }
+}
+// AppleScript 字符串字面量: 转义 \ 与 ", 换行用 linefeed 拼接(保留正文分行)。
+function appleScriptText(s) {
+  return String(s == null ? '' : s).split(/\r?\n/)
+    .map((l) => '"' + l.replace(/[\\"]/g, '\\$&') + '"').join(' & linefeed & ');
+}
+function showAnnouncementDialog(a) {
+  if (process.platform !== 'darwin' && !process.env.LARK_REVIEW_DIALOG_CMD) return;
+  const port = cfg.configPort || 8790;
+  const head = `${a.level === 'important' ? '【重要】' : ''}${a.title}`;
+  const body = `${a.message}\n\n—— ${a.ts ? new Date(a.ts).toLocaleString('zh-CN', { hour12: false }) : ''} 服务端公告`;
+  // 测试钩子: LARK_REVIEW_DIALOG_CMD <标题> <正文> 代替 osascript, stdout 模拟点了哪个按钮
+  const [cmd, args] = process.env.LARK_REVIEW_DIALOG_CMD
+    ? [process.env.LARK_REVIEW_DIALOG_CMD, [head, body]]
+    : ['osascript', ['-e', `display dialog ${appleScriptText(body)} with title ${appleScriptText(head)} `
+        + `buttons {"打开配置页", "知道了"} default button "知道了" with icon ${a.level === 'important' ? 'caution' : 'note'}`]];
+  try {
+    const c = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] });   // 异步, 不阻塞 review
+    let out = '';
+    c.stdout.on('data', (d) => { out += d; });
+    c.on('error', () => {});
+    c.on('close', () => {
+      if (out.includes('知道了')) dismissAnnouncement(a.id);
+      else if (out.includes('打开配置页')) {
+        if (process.env.LARK_REVIEW_DIALOG_CMD) { log(`(测试钩子) 跳过打开配置页 http://127.0.0.1:${port}/`); return; }
+        try { spawn('open', [`http://127.0.0.1:${port}/`], { stdio: 'ignore' }).on('error', () => {}); } catch { /* ignore */ }
+      }
+    });
+  } catch { /* ignore */ }
+}
+function receiveAnnouncement(a) {
+  if (!a || !a.id || !a.title) return;
+  if (!announcements.some((x) => x.id === a.id)) announcements.push(a);
+  if (announceState.seen.includes(a.id)) return;          // 已弹过: 只进横幅, 不再打扰
+  announceState.seen.push(a.id); saveAnnounceState(announceState);
+  log(`📢 服务端公告: ${a.title} —— ${oneLine(a.message, 200)}`);
+  showAnnouncementDialog(a);
 }
 
 // ---------- 每次 review 的完整 claude 输出, 存到本机 ----------
@@ -713,6 +774,18 @@ ___RESULT___ verdict=<APPROVE|COMMENT|REQUEST_CHANGES> general_comment_url=<url-
 (If the instructions above did not ask you to post/submit anything, use general_comment_url=NONE and
 inline_count=0; verdict must still reflect your actual review conclusion.)`;
 
+// 自动 review 标记(独立于任何提示词, 一律追加): 让 General Comment 末尾带固定标记, 在 ADO/GitHub
+// 上一眼区分"AI 自动 review"与"本人手动 review"(client 用成员自己的账号提交, 平台侧无从区分)。
+// 只给人看: 服务端统计自动/手动以 client 回报的完成记录为准, 不依赖它(模型偶尔可能漏写)。
+const AUTO_REVIEW_MARK_SUFFIX = `
+
+---
+[Appended by lark-review-client — marking ONLY. It does NOT change any review instruction above.]
+If you post a General Comment / review summary, its very LAST line MUST be exactly:
+— 🤖 AI Review · LarkBot 自动派单 · job {{JOB_ID}}
+This marker goes INSIDE the posted comment only. Your own final printed output is unchanged:
+it must still end with the result line exactly as required above.`;
+
 function renderPrompt(job, worktreePath, ciStatus, repoTmpl) {
   // 提示词优先级: 该项目的本机提示词(repos[].prompt) > 本机全局提示词(globalPrompt, 对所有项目生效) >
   // 服务端该 repo 默认(review_job.prompt_template 下发) > 按 provider 选内置默认模板。
@@ -728,6 +801,7 @@ function renderPrompt(job, worktreePath, ciStatus, repoTmpl) {
     .replaceAll('{{PR_URL}}', String(job.pr_url || ''))
     .replaceAll('{{REPO}}', String(job.repo || ''));
   if (!rendered.includes('___RESULT___')) rendered += RESULT_CONTRACT_SUFFIX;
+  rendered += AUTO_REVIEW_MARK_SUFFIX.replaceAll('{{JOB_ID}}', String(job.job_id || ''));
   return rendered;
 }
 
@@ -1154,6 +1228,9 @@ let identity = { open_id: null, name: null, recommended_version: null };
 // 配置页据此列出可参与的项目; autoRepos 开启时它们即使未在本机配置也自动参与。
 // 启动时先用本地缓存(上次下发的), 保证重启后首次 register 就带上完整自动参与列表。
 let managedRepos = loadManagedCache();
+// 服务端统一下发的 review 模型(register_ack / review_model_updated; hub 派单也强制用它)。
+// 非空 → 配置页模型只读显示它; 空(旧 hub 未下发 / 尚未注册)→ 本机配置可改并生效。
+let serverReviewModel = null;
 
 function send(obj) { try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch {} }
 
@@ -1265,6 +1342,11 @@ function connect() {
         flushPendingResults();   // 断线/重启期间攒下的 review 结果(含用量)重发, 收到 ack 才清
         identity = { open_id: msg.open_id, name: msg.name, recommended_version: msg.recommended_version || null, upgrade: msg.upgrade || null };
         if (Array.isArray(msg.managed_repos)) { managedRepos = msg.managed_repos; saveManagedCache(managedRepos); }
+        // 每次注册都按 ack 重置: 连到不下发模型的旧 hub → 退回本机配置可改。
+        serverReviewModel = (typeof msg.review_model === 'string' && msg.review_model.trim()) ? msg.review_model.trim() : null;
+        if (serverReviewModel) log(`review 模型由服务端统一下发: ${serverReviewModel}(本机配置 ${cfg.reviewModel} 暂不生效)`);
+        // 有效期内的公告随 ack 补发: 以 ack 为准重置列表(服务端撤回/过期的随之消失), 新的才弹。
+        if (Array.isArray(msg.announcements)) { announcements = []; msg.announcements.forEach(receiveAnnouncement); }
         log(`registered as ${msg.name} (${msg.open_id}) ✓  本机 v${CLIENT_VERSION}，服务端推荐 v${msg.recommended_version || '?'}`);
         // 对照服务端清单提示配置缺口: 本地多配的(不会被派单)。
         const managedNames = new Set(managedRepos.map((r) => r.repo));
@@ -1296,6 +1378,16 @@ function connect() {
         }
         break;
       }
+      case 'announcement':
+        receiveAnnouncement(msg);
+        break;
+      case 'review_model_updated':
+        // 管理员在 hub 切换了 review 模型 → 配置页刷新即显示新值。
+        if (typeof msg.review_model === 'string' && msg.review_model.trim()) {
+          serverReviewModel = msg.review_model.trim();
+          log(`服务端 review 模型已切换为: ${serverReviewModel}`);
+        }
+        break;
       case 'repos_updated':
         // 管理员在 hub 改了 Repo 规则 → 即时更新本地清单, 配置页刷新即可看到。
         if (Array.isArray(msg.managed_repos)) {
@@ -1430,7 +1522,9 @@ function persistConfig(incoming) {
     serverUrl: String(incoming.serverUrl || '').trim(),
     token: String(incoming.token || '').trim(),
     claudePath: String(incoming.claudePath || 'claude').trim() || 'claude',
-    reviewModel: String(incoming.reviewModel || 'claude-opus-4-8').trim() || 'claude-opus-4-8',
+    reviewModel: serverReviewModel
+      ? (cur.reviewModel || 'claude-opus-4-8')
+      : (String(incoming.reviewModel || 'claude-opus-4-8').trim() || 'claude-opus-4-8'),
     worktreeMaxAgeDays: Number(incoming.worktreeMaxAgeDays) || 14,
     heartbeatMs: Number(incoming.heartbeatMs) || 15000,
     reviewTimeoutMs: (typeof incoming.reviewTimeoutMs === 'number' && incoming.reviewTimeoutMs >= 0)
@@ -1589,6 +1683,8 @@ function startConfigServer() {
         defaultPromptAzdo: DEFAULT_PROMPT_TEMPLATE_AZDO,  // 同上(Azure DevOps 项目用)
         // 服务端受管 repo 清单(register_ack/repos_updated 下发): 配置页据此渲染项目列表。
         managedRepos,
+        // 服务端下发的模型(非空 → 配置页只读显示, 本机 reviewModel 不生效也不被覆盖)。
+        serverReviewModel,
       });
     }
     if (req.method === 'GET' && u === '/status') {
@@ -1601,6 +1697,9 @@ function startConfigServer() {
         // 执行中/排队的 Review 任务(供菜单栏插件 lionreview 显示; 无防护/审计)。
         running: runningJob ? [{ repo: runningJob.repo, pr_num: runningJob.pr_num, branch: runningJob.branch, stage: runningJob.stage, since: runningJob.since }] : [],
         queued: queue.map((j) => ({ repo: j.repo, pr_num: j.pr_num })),
+        // 未点「知道了」的有效公告(配置页顶部横幅显示全文)
+        announcements: announcements.filter((a) => !announceState.dismissed.includes(a.id)
+          && !(a.expires_at && Date.parse(a.expires_at) <= Date.now())),
       });
     }
     // 设置页「额度」tab: 账号套餐 + 5小时/周窗用量与重置时间 + 模型信息(读缓存, 不 spawn claude)。
@@ -1642,6 +1741,17 @@ function startConfigServer() {
       if (!/^pr-[^/]+\.log$/.test(f)) return json(400, { error: 'bad file' });
       try { return json(200, { file: f, log: fs.readFileSync(path.join(REVIEW_LOG_DIR, f), 'utf8').slice(-200000) }); }
       catch (e) { return json(200, { file: f, log: '读取失败: ' + e.message }); }
+    }
+    if (req.method === 'POST' && u === '/announcement/dismiss') {
+      let body = '';
+      req.on('data', (d) => { body += d; if (body.length > 10000) req.destroy(); });
+      req.on('end', () => {
+        let id = ''; try { id = String(JSON.parse(body || '{}').id || ''); } catch { /* bad json */ }
+        if (!id) return json(400, { error: 'id required' });
+        dismissAnnouncement(id);
+        return json(200, { ok: true });
+      });
+      return;
     }
     if (req.method === 'POST' && u === '/restart') {
       json(200, { ok: true });

@@ -53,6 +53,20 @@ ___RESULT___ verdict=<APPROVE|COMMENT|REQUEST_CHANGES> general_comment_url=<url-
 inline_count=0; verdict must still reflect your actual review conclusion.)
 """
 
+/// 自动 review 标记(独立于任何提示词, 一律追加, 与 Node 版逐字一致): 让 General Comment 末尾带固定标记,
+/// 在 ADO/GitHub 上区分"AI 自动 review"与"本人手动 review"(client 用成员自己的账号提交, 平台侧无从区分)。
+/// 只给人看: 服务端统计自动/手动以 client 回报的完成记录为准, 不依赖它。
+let AUTO_REVIEW_MARK_SUFFIX = """
+
+
+---
+[Appended by lark-review-client — marking ONLY. It does NOT change any review instruction above.]
+If you post a General Comment / review summary, its very LAST line MUST be exactly:
+— 🤖 AI Review · LarkBot 自动派单 · job {{JOB_ID}}
+This marker goes INSIDE the posted comment only. Your own final printed output is unchanged:
+it must still end with the result line exactly as required above.
+"""
+
 /// 提示词优先级(与 Node 版一致): 该项目的本机提示词(repos[].prompt) > 本机全局提示词(globalPrompt) >
 /// 服务端该 repo 默认(review_job.prompt_template 下发) > 按 provider 选内置默认模板。
 func renderPrompt(job: ReviewJob, worktreePath: String, ciStatus: String,
@@ -75,6 +89,7 @@ func renderPrompt(job: ReviewJob, worktreePath: String, ciStatus: String,
         .replacingOccurrences(of: "{{PR_URL}}", with: job.pr_url ?? "")
         .replacingOccurrences(of: "{{REPO}}", with: job.repo)
     if !rendered.contains("___RESULT___") { rendered += RESULT_CONTRACT_SUFFIX }
+    rendered += AUTO_REVIEW_MARK_SUFFIX.replacingOccurrences(of: "{{JOB_ID}}", with: job.job_id)
     return rendered
 }
 

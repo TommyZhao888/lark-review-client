@@ -73,7 +73,15 @@ struct SettingsView: View {
             Section("Claude") {
                 TextField("claude 路径", text: $draft.claudePath, prompt: Text("claude"))
                 claudePathStatus
-                TextField("review 模型", text: $draft.reviewModel, prompt: Text("claude-opus-4-8"))
+                // 服务端下发了模型 → 只读显示(派单也强制用它); 未下发(旧 hub)才允许改本机配置。
+                if let srv = state.serverReviewModel {
+                    LabeledContent("review 模型", value: srv)
+                    Text("由服务端统一下发，本机不可修改（服务端未下发时才可修改）。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    TextField("review 模型", text: $draft.reviewModel, prompt: Text("claude-opus-4-8"))
+                }
             }
             Section("运行") {
                 TextField("心跳间隔 (ms)", value: $draft.heartbeatMs, format: .number)

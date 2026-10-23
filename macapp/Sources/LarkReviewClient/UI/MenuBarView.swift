@@ -14,12 +14,38 @@ struct MenuBarView: View {
             Divider()
             statusSection
             if let up = state.upgrade { upgradeBanner(up) }
+            ForEach(state.visibleAnnouncements) { a in announcementBanner(a) }
             jobSection
             Divider()
             actions
         }
         .padding(12)
         .frame(width: 320)
+    }
+
+    /// 服务端公告横幅: 点击打开详情窗口看全文(面板只显示两行摘要)。
+    private func announcementBanner(_ a: Announcement) -> some View {
+        Button {
+            dismiss()
+            AppRuntime.shared.showAnnouncement(a)
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text((a.isImportant ? "⚠️ " : "📢 ") + a.title)
+                    .font(.callout.bold())
+                Text(a.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text("点击查看完整内容")
+                    .font(.caption2)
+                    .foregroundStyle(.tint)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background((a.isImportant ? Color.red : Color.accentColor).opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
     }
 
     private var header: some View {

@@ -246,6 +246,52 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(p.contains("repo o/r"))
     }
 
+    // ---------- v1.11: 服务端下发 review 模型 ----------
+
+    func testParseRegisterAckWithReviewModel() {
+        let text = #"{"type":"register_ack","open_id":"ou_1","name":"A","review_model":"claude-opus-5-5"}"#
+        guard case .registerAck(let ack)? = InboundMessage.parse(text) else { return XCTFail("应解析为 register_ack") }
+        XCTAssertEqual(ack.review_model, "claude-opus-5-5")
+    }
+
+    func testParseRegisterAckWithoutReviewModelIsNil() {
+        // 旧 hub 不带该字段 → nil, 设置页退回可改本机配置
+        guard case .registerAck(let ack)? = InboundMessage.parse(#"{"type":"register_ack","open_id":"ou_1"}"#)
+        else { return XCTFail("应解析为 register_ack") }
+        XCTAssertNil(ack.review_model)
+    }
+
+    func testParseReviewModelUpdated() {
+        guard case .reviewModelUpdated(let upd)? = InboundMessage.parse(#"{"type":"review_model_updated","review_model":"claude-sonnet-5-5"}"#)
+        else { return XCTFail("应解析为 review_model_updated") }
+        XCTAssertEqual(upd.review_model, "claude-sonnet-5-5")
+    }
+
+    // ---------- v1.11: 自动 review 标记 ----------
+
+    func testRenderPromptAppendsAutoReviewMark() {
+        let builtin = renderPrompt(job: makeJob(), worktreePath: "/wt", ciStatus: "ok", repoTemplate: nil)
+        let lastLine = builtin.split(separator: "\n").last.map(String.init) ?? ""
+        XCTAssertTrue(builtin.contains("— 🤖 AI Review · LarkBot 自动派单 · job \(makeJob().job_id)"))
+        XCTAssertTrue(lastLine.contains("result line"), "标记段末尾须重申最终输出仍是结果行")
+        // 自定义提示词: 先补结果行契约, 再追加标记, 都只出现一次
+        let custom = renderPrompt(job: makeJob(), worktreePath: "/wt", ciStatus: "ok", repoTemplate: "custom {{PR_NUM}}")
+        XCTAssertEqual(custom.components(separatedBy: "___RESULT___").count - 1, 1)
+        XCTAssertEqual(custom.components(separatedBy: "AI Review · LarkBot").count - 1, 1)
+    }
+
+    func testAutoReviewMarkMatchesNode() throws {
+        // 与 Node 版逐字一致(两种形态协议/行为对等)
+        let jsURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("lark-review-client.js")
+        let js = try String(contentsOf: jsURL, encoding: .utf8)
+        guard let r = js.range(of: "const AUTO_REVIEW_MARK_SUFFIX = `"),
+              let end = js.range(of: "`;", range: r.upperBound..<js.endIndex)
+        else { return XCTFail("Node 源码里找不到 AUTO_REVIEW_MARK_SUFFIX") }
+        XCTAssertEqual(String(js[r.upperBound..<end.lowerBound]), AUTO_REVIEW_MARK_SUFFIX)
+    }
+
     func testCiStatusString() {
         XCTAssertEqual(ciStatusString(overall: "failing", failedNames: "unit, lint"),
                        "failing; failed checks: unit, lint")
